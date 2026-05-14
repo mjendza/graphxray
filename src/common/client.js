@@ -100,6 +100,232 @@ function generateLocalPowerShellSnippet(method, url, body, options = {}) {
   return lines.join("\n");
 }
 
+const GUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const HCL_IDENT_REGEX = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+const TF_READONLY_KEYS = new Set([
+  "id",
+  "createdDateTime",
+  "deletedDateTime",
+  "renewedDateTime",
+  "modifiedDateTime",
+]);
+// @odata annotations that are server-generated and should be stripped from a recreate template.
+// Anything not listed here (notably @odata.type discriminators and *@odata.bind references) is kept.
+const TF_STRIP_ODATA_SUFFIXES = [
+  "@odata.context",
+  "@odata.nextLink",
+  "@odata.deltaLink",
+  "@odata.count",
+  "@odata.id",
+  "@odata.editLink",
+  "@odata.readLink",
+  "@odata.etag",
+  "@odata.mediaEtag",
+  "@odata.mediaContentType",
+  "@odata.mediaReadLink",
+  "@odata.mediaEditLink",
+];
+const TF_COLLECTION_SINGULARS = {
+  groups: "group",
+  users: "user",
+  applications: "application",
+  servicePrincipals: "service_principal",
+  oauth2PermissionGrants: "oauth2_permission_grant",
+  appRoleAssignedTo: "app_role_assignment",
+  federatedIdentityCredentials: "federated_identity_credential",
+  devices: "device",
+  contacts: "contact",
+};
+
+function hashUrl(url) {
+  let h = 0;
+  for (let i = 0; i < url.length; i++) {
+    h = ((h << 5) - h + url.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h).toString(36).slice(0, 6);
+}
+
+function sanitizeLabel(value) {
+  return String(value)
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function shouldStripOdataKey(key) {
+  return TF_STRIP_ODATA_SUFFIXES.some(
+    (suffix) => key === suffix || key.endsWith(suffix)
+  );
+}
+
+function stripReadOnlyFields(value, depth = 0) {
+  if (Array.isArray(value)) {
+    return value.map((item) => stripReadOnlyFields(item, depth + 1));
+  }
+  if (value !== null && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (shouldStripOdataKey(k)) continue;
+      if (depth === 0 && TF_READONLY_KEYS.has(k)) continue;
+      out[k] = stripReadOnlyFields(v, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+
+function formatHclString(str) {
+  const escaped = String(str)
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
+  return `"${escaped}"`;
+}
+
+function formatHclValue(value, indent) {
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") return String(value);
+  if (typeof value === "string") return formatHclString(value);
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "[]";
+    const inner = indent + "  ";
+    const items = value.map((v) => `${inner}${formatHclValue(v, inner)},`);
+    return `[\n${items.join("\n")}\n${indent}]`;
+  }
+
+  if (typeof value === "object") {
+    const entries = Object.entries(value);
+    if (entries.length === 0) return "{}";
+    const inner = indent + "  ";
+    const keyWidth = Math.max(
+      ...entries.map(([k]) => (HCL_IDENT_REGEX.test(k) ? k.length : k.length + 2))
+    );
+    const lines = entries.map(([k, v]) => {
+      const keyOut = HCL_IDENT_REGEX.test(k) ? k : formatHclString(k);
+      const pad = " ".repeat(Math.max(0, keyWidth - keyOut.length));
+      return `${inner}${keyOut}${pad} = ${formatHclValue(v, inner)}`;
+    });
+    return `{\n${lines.join("\n")}\n${indent}}`;
+  }
+
+  return formatHclString(String(value));
+}
+
+function normalizeTerraformUrl(url) {
+  const { path } = parseGraphUrl(url);
+  let trimmed = path.replace(/^\/+/, "").split("?")[0];
+
+  let apiVersion = null;
+  if (/^v1\.0\//i.test(trimmed)) {
+    trimmed = trimmed.replace(/^v1\.0\//i, "");
+  } else if (/^beta\//i.test(trimmed)) {
+    apiVersion = "beta";
+    trimmed = trimmed.replace(/^beta\//i, "");
+  }
+
+  const segments = trimmed.split("/").filter(Boolean);
+  if (segments.length > 1) {
+    const last = segments[segments.length - 1];
+    if (GUID_REGEX.test(last)) {
+      segments.pop();
+    }
+  }
+  return { url: segments.join("/"), apiVersion };
+}
+
+function leafCollectionName(normalizedUrl) {
+  const segments = normalizedUrl.split("/").filter((s) => s && !s.startsWith("$"));
+  for (let i = segments.length - 1; i >= 0; i--) {
+    if (!GUID_REGEX.test(segments[i])) return segments[i];
+  }
+  return "";
+}
+
+function buildResourceLabel(normalizedUrl, body, fallbackSeed) {
+  const collection = leafCollectionName(normalizedUrl);
+  const prefix = TF_COLLECTION_SINGULARS[collection] || sanitizeLabel(collection) || "resource";
+
+  const nameCandidates = ["displayName", "mailNickname", "userPrincipalName", "name"];
+  for (const key of nameCandidates) {
+    const raw = body && typeof body === "object" ? body[key] : null;
+    if (typeof raw === "string" && raw.trim()) {
+      const slug = sanitizeLabel(raw);
+      if (slug) return `${prefix}_${slug}`;
+    }
+  }
+  return `${prefix}_${hashUrl(fallbackSeed)}`;
+}
+
+function renderTerraformBlock(label, url, apiVersion, body) {
+  const lines = [];
+  lines.push(`resource "msgraph_resource" "${label}" {`);
+  lines.push(`  url = "${url}"`);
+  if (apiVersion) {
+    lines.push(`  api_version = "${apiVersion}"`);
+  }
+  lines.push(`  body = ${formatHclValue(body, "  ")}`);
+  lines.push(`}`);
+  return lines.join("\n");
+}
+
+function uniqueLabel(base, used) {
+  if (!used.has(base)) {
+    used.add(base);
+    return base;
+  }
+  let i = 2;
+  while (used.has(`${base}_${i}`)) i++;
+  const next = `${base}_${i}`;
+  used.add(next);
+  return next;
+}
+
+function tryParseJson(text) {
+  if (!text || typeof text !== "string") return null;
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function generateTerraformSnippet(method, url, requestBody, responseBody) {
+  const methodUpper = (method || "GET").toUpperCase();
+  if (methodUpper === "DELETE" || methodUpper === "OPTIONS") return null;
+
+  const source =
+    methodUpper === "GET" ? responseBody || requestBody : requestBody || responseBody;
+  const parsed = tryParseJson(source);
+  if (parsed === null || typeof parsed !== "object") return null;
+
+  const { url: normalizedUrl, apiVersion } = normalizeTerraformUrl(url);
+  if (!normalizedUrl) return null;
+
+  const used = new Set();
+  const items =
+    parsed && Array.isArray(parsed.value) ? parsed.value : [parsed];
+
+  const blocks = [];
+  items.forEach((item, idx) => {
+    if (!item || typeof item !== "object") return;
+    const cleaned = stripReadOnlyFields(item);
+    if (!cleaned || Object.keys(cleaned).length === 0) return;
+    const baseLabel = buildResourceLabel(normalizedUrl, item, `${url}#${idx}`);
+    const label = uniqueLabel(baseLabel, used);
+    blocks.push(renderTerraformBlock(label, normalizedUrl, apiVersion, cleaned));
+  });
+
+  if (blocks.length === 0) return null;
+  return blocks.join("\n\n");
+}
+
 async function getSnippetFromDevX(snippetLanguage, method, url, body, options = {}) {
   console.log("Get code snippet from DevX:", url, method);
 
@@ -108,6 +334,11 @@ async function getSnippetFromDevX(snippetLanguage, method, url, body, options = 
     const { host, path } = parseGraphUrl(url);
     const fullUrl = `https://${host}/${path.replace(/^\/+/, '')}`;
     return fullUrl;
+  }
+
+  // Terraform (msgraph): always generate locally, DevX has no Terraform support
+  if (snippetLanguage === "terraform") {
+    return generateTerraformSnippet(method, url, body ?? "", options.responseBody ?? "");
   }
 
   // PowerShell (Invoke-MgGraphRequest): always use local generation, never call DevX
@@ -445,14 +676,14 @@ const getCodeView = async function (
       baseUrl,
       options
     );
-    
+
     // Also generate a code snippet for the main batch request
     code = await getPowershellCmd(
       snippetLanguage,
       request.method,
       version + request.url,
       requestBody,
-      { ...options, includeConsistencyLevelHeader }
+      { ...options, includeConsistencyLevelHeader, responseBody: responseContent }
     );
   } else {
     // Regular single request
@@ -461,7 +692,7 @@ const getCodeView = async function (
       request.method,
       version + request.url,
       requestBody,
-      { ...options, includeConsistencyLevelHeader }
+      { ...options, includeConsistencyLevelHeader, responseBody: responseContent }
     );
   }
   
@@ -475,4 +706,4 @@ const getCodeView = async function (
   console.log("CodeView", codeView);
   return codeView;
 };
-export { getPowershellCmd, getRequestBody, getResponseContent, getCodeView, getBatchCodeSnippets, generateLocalPowerShellSnippet };
+export { getPowershellCmd, getRequestBody, getResponseContent, getCodeView, getBatchCodeSnippets, generateLocalPowerShellSnippet, generateTerraformSnippet };

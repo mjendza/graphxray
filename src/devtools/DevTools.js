@@ -29,7 +29,8 @@ const options = [
   { key: "javascript", text: "JavaScript", fileExt: "js" },
   { key: "java", text: "Java", fileExt: "java" },
   { key: "objective-c", text: "Objective-C", fileExt: "c" },
-  { key: "go", text: "Go", fileExt: "go" },  
+  { key: "go", text: "Go", fileExt: "go" },
+  { key: "terraform", text: "Terraform (msgraph)", fileExt: "tf" },
 ];
 
 class DevTools extends React.Component {
