@@ -273,6 +273,15 @@ function renderTerraformBlock(label, url, apiVersion, body) {
   return lines.join("\n");
 }
 
+function prependGetWarning(block) {
+  return [
+    "# WARNING: Generated from a GET response - review before apply.",
+    "# Read-only and server-generated fields were stripped heuristically;",
+    "# verify required attributes, defaults, and @odata discriminators.",
+    block,
+  ].join("\n");
+}
+
 function uniqueLabel(base, used) {
   if (!used.has(base)) {
     used.add(base);
@@ -296,9 +305,10 @@ function tryParseJson(text) {
   }
 }
 
-function generateTerraformSnippet(method, url, requestBody, responseBody) {
+function generateTerraformSnippet(method, url, requestBody, responseBody, experimentalCreateFromGet = false) {
   const methodUpper = (method || "GET").toUpperCase();
   if (methodUpper === "DELETE" || methodUpper === "OPTIONS") return null;
+  if (methodUpper === "GET" && !experimentalCreateFromGet) return null;
 
   const source =
     methodUpper === "GET" ? responseBody || requestBody : requestBody || responseBody;
@@ -319,7 +329,8 @@ function generateTerraformSnippet(method, url, requestBody, responseBody) {
     if (!cleaned || Object.keys(cleaned).length === 0) return;
     const baseLabel = buildResourceLabel(normalizedUrl, item, `${url}#${idx}`);
     const label = uniqueLabel(baseLabel, used);
-    blocks.push(renderTerraformBlock(label, normalizedUrl, apiVersion, cleaned));
+    const block = renderTerraformBlock(label, normalizedUrl, apiVersion, cleaned);
+    blocks.push(methodUpper === "GET" ? prependGetWarning(block) : block);
   });
 
   if (blocks.length === 0) return null;
@@ -338,7 +349,13 @@ async function getSnippetFromDevX(snippetLanguage, method, url, body, options = 
 
   // Terraform (msgraph): always generate locally, DevX has no Terraform support
   if (snippetLanguage === "terraform") {
-    return generateTerraformSnippet(method, url, body ?? "", options.responseBody ?? "");
+    return generateTerraformSnippet(
+      method,
+      url,
+      body ?? "",
+      options.responseBody ?? "",
+      options.experimentalCreateFromGet === true,
+    );
   }
 
   // PowerShell (Invoke-MgGraphRequest): always use local generation, never call DevX

@@ -10,6 +10,7 @@ import { Dropdown } from "@fluentui/react/lib/Dropdown";
 import { Toggle } from "@fluentui/react/lib/Toggle";
 import { IconButton } from "@fluentui/react/lib/Button";
 import { TooltipHost } from "@fluentui/react/lib/Tooltip";
+import { MessageBar, MessageBarType } from "@fluentui/react/lib/MessageBar";
 import { SearchBox } from "@fluentui/react/lib/SearchBox";
 import DevToolsCommandBar from "../components/DevToolsCommandBar";
 import { Layer } from "@fluentui/react/lib/Layer";
@@ -39,11 +40,15 @@ class DevTools extends React.Component {
     // Load ultraXRayMode from localStorage, default to false
     const savedUltraXRayMode = localStorage.getItem('graphxray-ultraXRayMode');
     const ultraXRayMode = savedUltraXRayMode ? JSON.parse(savedUltraXRayMode) : false;
-    
+
+    const savedExperimentalCreateFromGet = localStorage.getItem('graphxray-experimentalCreateFromGet');
+    const experimentalCreateFromGet = savedExperimentalCreateFromGet ? JSON.parse(savedExperimentalCreateFromGet) : false;
+
     this.state = {
       stack: [],
       snippetLanguage: "powershell",
       ultraXRayMode: ultraXRayMode,
+      experimentalCreateFromGet: experimentalCreateFromGet,
       filterText: "",
       selectedMethods: new Set(),
       selectedResources: new Set(),
@@ -123,7 +128,7 @@ class DevTools extends React.Component {
         request,
         version,
         harEntry,
-        { preferLocalPowerShell: true }
+        { preferLocalPowerShell: true, experimentalCreateFromGet: this.state.experimentalCreateFromGet }
       );
       console.log("DevTools - local getCodeView returned:", localCodeView);
 
@@ -145,7 +150,7 @@ class DevTools extends React.Component {
         request,
         version,
         harEntry,
-        { devxOnly: true }
+        { devxOnly: true, experimentalCreateFromGet: this.state.experimentalCreateFromGet }
       );
       console.log("DevTools - server getCodeView returned:", serverCodeView);
 
@@ -190,7 +195,8 @@ class DevTools extends React.Component {
       this.state.snippetLanguage,
       request,
       version,
-      harEntry
+      harEntry,
+      { experimentalCreateFromGet: this.state.experimentalCreateFromGet }
     );
     console.log("DevTools - getCodeView returned:", codeView);
     if (codeView) {
@@ -413,6 +419,12 @@ class DevTools extends React.Component {
     localStorage.setItem('graphxray-ultraXRayMode', JSON.stringify(checked));
     this.clearStack(); // Clear the stack when toggling mode
   };
+
+  onExperimentalCreateFromGetToggle = (e, checked) => {
+    this.setState({ experimentalCreateFromGet: checked });
+    localStorage.setItem('graphxray-experimentalCreateFromGet', JSON.stringify(checked));
+    this.clearStack();
+  };
   render() {
     return (
       <div className="App" style={{ fontSize: FontSizes.size12 }}>
@@ -506,7 +518,63 @@ class DevTools extends React.Component {
                   />
                 </TooltipHost>
               </div>
+
+              {this.state.snippetLanguage === "terraform" && (
+                <div style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  marginBottom: "8px"
+                }}>
+                  <Toggle
+                    label="Create resource from GET response"
+                    checked={this.state.experimentalCreateFromGet}
+                    onChange={this.onExperimentalCreateFromGetToggle}
+                    onText="On"
+                    offText="Off"
+                    styles={{
+                      root: { marginBottom: 0 },
+                      label: { fontWeight: "600" }
+                    }}
+                  />
+                  <TooltipHost
+                    content="When enabled, GET responses are used to render msgraph_resource blocks. Read-only and server-generated fields are stripped heuristically, so review every attribute before applying. When disabled, only POST/PUT/PATCH requests produce terraform snippets."
+                    styles={{
+                      root: {
+                        display: "inline-block"
+                      }
+                    }}
+                  >
+                    <IconButton
+                      iconProps={{ iconName: "Info" }}
+                      title="Experimental create from get information"
+                      styles={{
+                        root: {
+                          minWidth: "24px",
+                          width: "24px",
+                          height: "24px",
+                          color: "#666",
+                          backgroundColor: "transparent",
+                          border: "1px solid #ccc",
+                          borderRadius: "50%"
+                        },
+                        rootHovered: {
+                          backgroundColor: "rgba(0, 0, 0, 0.05)",
+                          color: "#333"
+                        }
+                      }}
+                    />
+                  </TooltipHost>
+                </div>
+              )}
             </div>
+            {this.state.snippetLanguage === "terraform" && this.state.experimentalCreateFromGet && (
+              <div style={{ marginTop: "12px" }}>
+                <MessageBar messageBarType={MessageBarType.warning} isMultiline={true}>
+                  <strong>Experimental:</strong> Terraform blocks are derived from observed GET responses. Read-only and server-generated fields are stripped heuristically &mdash; review every attribute (including required values, defaults, and odata discriminators) before running <code>terraform apply</code>.
+                </MessageBar>
+              </div>
+            )}
           </div>
           {this.state.stack && this.state.stack.length > 0 && (() => {
             const methodCounts = this.getUniqueMethods();
