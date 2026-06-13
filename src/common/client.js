@@ -101,7 +101,7 @@ function generateLocalPowerShellSnippet(method, url, body, options = {}) {
 }
 
 const GUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const HCL_IDENT_REGEX = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+const HCL_IDENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const TF_READONLY_KEYS = new Set([
   "id",
   "createdDateTime",
