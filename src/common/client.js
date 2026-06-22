@@ -724,3 +724,20 @@ const getCodeView = async function (
   return codeView;
 };
 export { getPowershellCmd, getRequestBody, getResponseContent, getCodeView, getBatchCodeSnippets, generateLocalPowerShellSnippet, generateTerraformSnippet };
+
+// Terraform helpers exported for unit testing.
+export {
+  hashUrl,
+  sanitizeLabel,
+  shouldStripOdataKey,
+  stripReadOnlyFields,
+  formatHclString,
+  formatHclValue,
+  normalizeTerraformUrl,
+  leafCollectionName,
+  buildResourceLabel,
+  renderTerraformBlock,
+  prependGetWarning,
+  uniqueLabel,
+  tryParseJson,
+};

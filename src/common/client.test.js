@@ -1,0 +1,571 @@
+import {
+  generateTerraformSnippet,
+  normalizeTerraformUrl,
+  stripReadOnlyFields,
+  formatHclValue,
+  formatHclString,
+  buildResourceLabel,
+  renderTerraformBlock,
+  prependGetWarning,
+  uniqueLabel,
+  sanitizeLabel,
+  shouldStripOdataKey,
+  hashUrl,
+  leafCollectionName,
+  tryParseJson,
+} from "./client.js";
+
+const GUID = "12345678-1234-1234-1234-123456789012";
+
+describe("tryParseJson", () => {
+  it("parses a JSON object", () => {
+    expect(tryParseJson('{"a":1}')).toEqual({ a: 1 });
+  });
+
+  it("parses a JSON array", () => {
+    expect(tryParseJson("[1,2,3]")).toEqual([1, 2, 3]);
+  });
+
+  it("trims surrounding whitespace before parsing", () => {
+    expect(tryParseJson('   {"a":1}   ')).toEqual({ a: 1 });
+  });
+
+  it("returns null for whitespace-only input", () => {
+    expect(tryParseJson("   ")).toBeNull();
+  });
+
+  it("returns null for an empty string", () => {
+    expect(tryParseJson("")).toBeNull();
+  });
+
+  it("returns null for null / non-string input", () => {
+    expect(tryParseJson(null)).toBeNull();
+    expect(tryParseJson(undefined)).toBeNull();
+    expect(tryParseJson(123)).toBeNull();
+    expect(tryParseJson({})).toBeNull();
+  });
+
+  it("returns null (does not throw) for malformed JSON", () => {
+    expect(tryParseJson("{not json}")).toBeNull();
+  });
+});
+
+describe("hashUrl", () => {
+  it("is deterministic for the same input", () => {
+    expect(hashUrl("https://graph.microsoft.com/v1.0/groups")).toBe(
+      hashUrl("https://graph.microsoft.com/v1.0/groups")
+    );
+  });
+
+  it("produces a short alphanumeric string of at most 6 chars", () => {
+    expect(hashUrl("some-seed-value")).toMatch(/^[a-z0-9]{1,6}$/);
+  });
+
+  it("produces different output for different input", () => {
+    expect(hashUrl("seed-a")).not.toBe(hashUrl("seed-b"));
+  });
+
+  it("handles the empty string", () => {
+    expect(hashUrl("")).toBe("0");
+  });
+});
+
+describe("sanitizeLabel", () => {
+  it("converts camelCase to snake_case", () => {
+    expect(sanitizeLabel("displayName")).toBe("display_name");
+  });
+
+  it("replaces spaces and symbols with underscores", () => {
+    expect(sanitizeLabel("Test Group!")).toBe("test_group");
+  });
+
+  it("strips leading and trailing underscores", () => {
+    expect(sanitizeLabel("  hello  ")).toBe("hello");
+    expect(sanitizeLabel("@@name@@")).toBe("name");
+  });
+
+  it("lowercases and keeps digits", () => {
+    expect(sanitizeLabel("Group123")).toBe("group123");
+  });
+
+  it("collapses runs of invalid characters into a single underscore", () => {
+    expect(sanitizeLabel("a---b...c")).toBe("a_b_c");
+  });
+
+  it("coerces non-string input via String()", () => {
+    expect(sanitizeLabel(42)).toBe("42");
+  });
+
+  it("returns an empty string when nothing valid remains", () => {
+    expect(sanitizeLabel("***")).toBe("");
+  });
+});
+
+describe("shouldStripOdataKey", () => {
+  it("matches an exact strip key", () => {
+    expect(shouldStripOdataKey("@odata.context")).toBe(true);
+    expect(shouldStripOdataKey("@odata.etag")).toBe(true);
+  });
+
+  it("matches a property-scoped suffix (foo@odata.etag)", () => {
+    expect(shouldStripOdataKey("photo@odata.mediaEtag")).toBe(true);
+  });
+
+  it("keeps @odata.type discriminators", () => {
+    expect(shouldStripOdataKey("@odata.type")).toBe(false);
+  });
+
+  it("keeps *@odata.bind references", () => {
+    expect(shouldStripOdataKey("members@odata.bind")).toBe(false);
+    expect(shouldStripOdataKey("@odata.bind")).toBe(false);
+  });
+
+  it("returns false for ordinary keys", () => {
+    expect(shouldStripOdataKey("displayName")).toBe(false);
+  });
+});
+
+describe("stripReadOnlyFields", () => {
+  it("removes top-level read-only keys", () => {
+    const input = {
+      id: GUID,
+      createdDateTime: "2020-01-01",
+      deletedDateTime: "2020-01-02",
+      renewedDateTime: "2020-01-03",
+      modifiedDateTime: "2020-01-04",
+      displayName: "keep",
+    };
+    expect(stripReadOnlyFields(input)).toEqual({ displayName: "keep" });
+  });
+
+  it("keeps read-only keys when nested (depth > 0)", () => {
+    const input = { owner: { id: "keep-me", displayName: "o" } };
+    expect(stripReadOnlyFields(input)).toEqual({
+      owner: { id: "keep-me", displayName: "o" },
+    });
+  });
+
+  it("strips @odata.* annotation keys at any depth", () => {
+    const input = {
+      "@odata.context": "ctx",
+      nested: { "@odata.etag": "e", name: "n" },
+    };
+    expect(stripReadOnlyFields(input)).toEqual({ nested: { name: "n" } });
+  });
+
+  it("preserves @odata.type and @odata.bind at any depth", () => {
+    const input = {
+      "@odata.type": "#microsoft.graph.user",
+      nested: { "members@odata.bind": ["url"] },
+    };
+    expect(stripReadOnlyFields(input)).toEqual({
+      "@odata.type": "#microsoft.graph.user",
+      nested: { "members@odata.bind": ["url"] },
+    });
+  });
+
+  it("recurses through arrays of objects", () => {
+    const input = { items: [{ "@odata.etag": "x", v: 1 }, { v: 2 }] };
+    expect(stripReadOnlyFields(input)).toEqual({ items: [{ v: 1 }, { v: 2 }] });
+  });
+
+  it("passes primitives and null through unchanged", () => {
+    expect(stripReadOnlyFields("str")).toBe("str");
+    expect(stripReadOnlyFields(7)).toBe(7);
+    expect(stripReadOnlyFields(null)).toBeNull();
+  });
+});
+
+describe("formatHclString", () => {
+  it("wraps a plain string in quotes", () => {
+    expect(formatHclString("hello")).toBe('"hello"');
+  });
+
+  it("escapes backslashes, quotes, newlines, carriage returns and tabs", () => {
+    expect(formatHclString('a\\b"c\nd\re\tf')).toBe('"a\\\\b\\"c\\nd\\re\\tf"');
+  });
+
+  it("coerces non-string input", () => {
+    expect(formatHclString(5)).toBe('"5"');
+  });
+});
+
+describe("formatHclValue", () => {
+  it("renders null and undefined as null", () => {
+    expect(formatHclValue(null, "")).toBe("null");
+    expect(formatHclValue(undefined, "")).toBe("null");
+  });
+
+  it("renders booleans", () => {
+    expect(formatHclValue(true, "")).toBe("true");
+    expect(formatHclValue(false, "")).toBe("false");
+  });
+
+  it("renders numbers as-is", () => {
+    expect(formatHclValue(42, "")).toBe("42");
+  });
+
+  it("delegates strings to HCL escaping", () => {
+    expect(formatHclValue('say "hi"', "")).toBe('"say \\"hi\\""');
+  });
+
+  it("renders an empty array and empty object compactly", () => {
+    expect(formatHclValue([], "")).toBe("[]");
+    expect(formatHclValue({}, "")).toBe("{}");
+  });
+
+  it("renders a non-empty array with indentation", () => {
+    expect(formatHclValue(["a", "b"], "")).toBe('[\n  "a",\n  "b",\n]');
+  });
+
+  it("aligns object keys by width", () => {
+    expect(formatHclValue({ a: 1, bbb: 2 }, "")).toBe(
+      "{\n  a   = 1\n  bbb = 2\n}"
+    );
+  });
+
+  it("quotes non-identifier keys and leaves identifier keys bare", () => {
+    const out = formatHclValue({ "@odata.type": "#x", name: "n" }, "");
+    expect(out).toContain('"@odata.type"');
+    expect(out).toContain('name');
+    expect(out).not.toContain('"name"');
+  });
+
+  it("renders nested structures", () => {
+    const out = formatHclValue({ outer: { inner: [1] } }, "");
+    expect(out).toBe("{\n  outer = {\n    inner = [\n      1,\n    ]\n  }\n}");
+  });
+});
+
+describe("normalizeTerraformUrl", () => {
+  it("strips the v1.0 prefix and reports no api version", () => {
+    expect(
+      normalizeTerraformUrl("https://graph.microsoft.com/v1.0/groups")
+    ).toEqual({ url: "groups", apiVersion: null });
+  });
+
+  it("detects the beta prefix as an api version", () => {
+    expect(
+      normalizeTerraformUrl("https://graph.microsoft.com/beta/groups")
+    ).toEqual({ url: "groups", apiVersion: "beta" });
+  });
+
+  it("matches the version prefix case-insensitively", () => {
+    expect(
+      normalizeTerraformUrl("https://graph.microsoft.com/V1.0/groups")
+    ).toEqual({ url: "groups", apiVersion: null });
+  });
+
+  it("drops a trailing GUID when there is more than one segment", () => {
+    expect(
+      normalizeTerraformUrl(`https://graph.microsoft.com/v1.0/groups/${GUID}`)
+    ).toEqual({ url: "groups", apiVersion: null });
+  });
+
+  it("keeps a lone GUID segment (only trims when >1 segment)", () => {
+    expect(
+      normalizeTerraformUrl(`https://graph.microsoft.com/v1.0/${GUID}`)
+    ).toEqual({ url: GUID, apiVersion: null });
+  });
+
+  it("removes the query string", () => {
+    expect(
+      normalizeTerraformUrl(
+        "https://graph.microsoft.com/v1.0/groups?$select=id,displayName"
+      )
+    ).toEqual({ url: "groups", apiVersion: null });
+  });
+
+  it("handles a relative path with no recognised domain", () => {
+    expect(
+      normalizeTerraformUrl(`/v1.0/users/${GUID}`)
+    ).toEqual({ url: "users", apiVersion: null });
+  });
+
+  it("preserves nested resource paths", () => {
+    expect(
+      normalizeTerraformUrl(
+        `https://graph.microsoft.com/v1.0/groups/${GUID}/members`
+      )
+    ).toEqual({ url: `groups/${GUID}/members`, apiVersion: null });
+  });
+});
+
+describe("leafCollectionName", () => {
+  it("returns the single segment", () => {
+    expect(leafCollectionName("groups")).toBe("groups");
+  });
+
+  it("returns the last non-GUID segment", () => {
+    expect(leafCollectionName(`groups/${GUID}/members`)).toBe("members");
+  });
+
+  it("skips a trailing GUID", () => {
+    expect(leafCollectionName(`groups/${GUID}`)).toBe("groups");
+  });
+
+  it("ignores $-prefixed segments", () => {
+    expect(leafCollectionName("groups/$count")).toBe("groups");
+  });
+
+  it("returns empty string when there is no collection", () => {
+    expect(leafCollectionName("")).toBe("");
+  });
+});
+
+describe("buildResourceLabel", () => {
+  const singulars = {
+    groups: "group",
+    users: "user",
+    applications: "application",
+    servicePrincipals: "service_principal",
+    oauth2PermissionGrants: "oauth2_permission_grant",
+    appRoleAssignedTo: "app_role_assignment",
+    federatedIdentityCredentials: "federated_identity_credential",
+    devices: "device",
+    contacts: "contact",
+  };
+
+  Object.entries(singulars).forEach(([collection, singular]) => {
+    it(`maps the "${collection}" collection to the "${singular}" prefix`, () => {
+      expect(buildResourceLabel(collection, { displayName: "X" }, "seed")).toBe(
+        `${singular}_x`
+      );
+    });
+  });
+
+  it("falls back to sanitizeLabel for an unknown collection", () => {
+    expect(
+      buildResourceLabel("widgets", { displayName: "My Thing" }, "seed")
+    ).toBe("widgets_my_thing"); // sanitizeLabel("widgets") === "widgets"
+  });
+
+  it("uses the 'resource' prefix when no collection name is present", () => {
+    expect(buildResourceLabel("", {}, "seed")).toBe(`resource_${hashUrl("seed")}`);
+  });
+
+  it("prefers displayName over the other name candidates", () => {
+    expect(
+      buildResourceLabel(
+        "groups",
+        { displayName: "Primary", mailNickname: "nick", name: "n" },
+        "seed"
+      )
+    ).toBe("group_primary");
+  });
+
+  it("falls through the candidate priority: mailNickname, then userPrincipalName, then name", () => {
+    expect(buildResourceLabel("groups", { mailNickname: "nick" }, "s")).toBe(
+      "group_nick"
+    );
+    expect(
+      buildResourceLabel("users", { userPrincipalName: "upn@contoso" }, "s")
+    ).toBe("user_upn_contoso");
+    expect(buildResourceLabel("contacts", { name: "Bob" }, "s")).toBe(
+      "contact_bob"
+    );
+  });
+
+  it("skips empty / whitespace-only candidates", () => {
+    expect(
+      buildResourceLabel("groups", { displayName: "   ", mailNickname: "nick" }, "s")
+    ).toBe("group_nick");
+  });
+
+  it("uses a deterministic hash fallback when no name candidate is found", () => {
+    const seed = "https://graph.microsoft.com/v1.0/groups#0";
+    expect(buildResourceLabel("groups", { foo: "bar" }, seed)).toBe(
+      `group_${hashUrl(seed)}`
+    );
+    expect(buildResourceLabel("groups", { foo: "bar" }, seed)).toBe(
+      buildResourceLabel("groups", { foo: "bar" }, seed)
+    );
+  });
+});
+
+describe("renderTerraformBlock", () => {
+  it("renders url and body and omits api_version when not set", () => {
+    const block = renderTerraformBlock("group_x", "groups", null, {
+      displayName: "X",
+    });
+    expect(block).toBe(
+      'resource "msgraph_resource" "group_x" {\n' +
+        '  url = "groups"\n' +
+        "  body = {\n" +
+        '    displayName = "X"\n' +
+        "  }\n" +
+        "}"
+    );
+  });
+
+  it("includes an api_version line when set", () => {
+    const block = renderTerraformBlock("group_x", "groups", "beta", {
+      displayName: "X",
+    });
+    expect(block).toContain('  api_version = "beta"');
+  });
+});
+
+describe("prependGetWarning", () => {
+  it("prepends the three warning comment lines above the block", () => {
+    const result = prependGetWarning("BLOCK");
+    const lines = result.split("\n");
+    expect(lines[0]).toBe(
+      "# WARNING: Generated from a GET response - review before apply."
+    );
+    expect(lines[1]).toMatch(/^# Read-only/);
+    expect(lines[2]).toMatch(/^# verify/);
+    expect(lines[3]).toBe("BLOCK");
+  });
+});
+
+describe("uniqueLabel", () => {
+  it("returns the base label on first use and records it", () => {
+    const used = new Set();
+    expect(uniqueLabel("group_x", used)).toBe("group_x");
+    expect(used.has("group_x")).toBe(true);
+  });
+
+  it("suffixes _2, _3 on subsequent collisions", () => {
+    const used = new Set();
+    expect(uniqueLabel("group_x", used)).toBe("group_x");
+    expect(uniqueLabel("group_x", used)).toBe("group_x_2");
+    expect(uniqueLabel("group_x", used)).toBe("group_x_3");
+  });
+});
+
+describe("generateTerraformSnippet", () => {
+  const URL = "https://graph.microsoft.com/v1.0/groups";
+
+  it("returns null for DELETE and OPTIONS", () => {
+    expect(generateTerraformSnippet("DELETE", URL, "{}", "")).toBeNull();
+    expect(generateTerraformSnippet("OPTIONS", URL, "{}", "")).toBeNull();
+  });
+
+  it("returns null for GET without the experimental flag", () => {
+    expect(
+      generateTerraformSnippet("GET", URL, "", '{"displayName":"X"}')
+    ).toBeNull();
+  });
+
+  it("generates a block from a GET response when the experimental flag is set, with a warning", () => {
+    const out = generateTerraformSnippet(
+      "GET",
+      URL,
+      "",
+      `{"id":"${GUID}","displayName":"X"}`,
+      true
+    );
+    expect(out).toContain("# WARNING: Generated from a GET response");
+    expect(out).toContain('resource "msgraph_resource" "group_x"');
+    expect(out).not.toContain(GUID); // read-only id stripped
+  });
+
+  it("produces an exact HCL block for a POST create", () => {
+    const out = generateTerraformSnippet(
+      "POST",
+      URL,
+      '{"displayName":"Marketing"}',
+      ""
+    );
+    expect(out).toBe(
+      'resource "msgraph_resource" "group_marketing" {\n' +
+        '  url = "groups"\n' +
+        "  body = {\n" +
+        '    displayName = "Marketing"\n' +
+        "  }\n" +
+        "}"
+    );
+  });
+
+  it("does not add a warning for non-GET methods", () => {
+    const out = generateTerraformSnippet(
+      "PATCH",
+      URL,
+      '{"displayName":"X"}',
+      ""
+    );
+    expect(out).not.toContain("WARNING");
+  });
+
+  it("falls back to responseBody for non-GET when requestBody is empty", () => {
+    const out = generateTerraformSnippet("POST", URL, "", '{"displayName":"X"}');
+    expect(out).toContain('resource "msgraph_resource" "group_x"');
+  });
+
+  it("falls back to requestBody for GET when responseBody is empty", () => {
+    const out = generateTerraformSnippet(
+      "GET",
+      URL,
+      '{"displayName":"X"}',
+      "",
+      true
+    );
+    expect(out).toContain('resource "msgraph_resource" "group_x"');
+  });
+
+  it("returns null for invalid / empty JSON", () => {
+    expect(generateTerraformSnippet("POST", URL, "not json", "")).toBeNull();
+    expect(generateTerraformSnippet("POST", URL, "", "")).toBeNull();
+  });
+
+  it("returns null for primitive (non-object) JSON", () => {
+    expect(generateTerraformSnippet("POST", URL, "123", "")).toBeNull();
+    expect(generateTerraformSnippet("POST", URL, '"a string"', "")).toBeNull();
+  });
+
+  it("emits one block per item for a collection response", () => {
+    const out = generateTerraformSnippet(
+      "GET",
+      URL,
+      "",
+      '{"value":[{"displayName":"Alpha"},{"displayName":"Beta"}]}',
+      true
+    );
+    const blocks = out.split("\n\n");
+    expect(blocks).toHaveLength(2);
+    expect(out).toContain('"group_alpha"');
+    expect(out).toContain('"group_beta"');
+  });
+
+  it("strips read-only and @odata fields from output", () => {
+    const out = generateTerraformSnippet(
+      "POST",
+      URL,
+      `{"@odata.context":"ctx","id":"${GUID}","displayName":"X"}`,
+      ""
+    );
+    expect(out).not.toContain("@odata.context");
+    expect(out).not.toContain(GUID);
+    expect(out).toContain('displayName = "X"');
+  });
+
+  it("returns null when every item is empty after stripping", () => {
+    expect(generateTerraformSnippet("POST", URL, `{"id":"${GUID}"}`, "")).toBeNull();
+  });
+
+  it("de-duplicates labels across collection items", () => {
+    const out = generateTerraformSnippet(
+      "GET",
+      URL,
+      "",
+      '{"value":[{"displayName":"Dup"},{"displayName":"Dup"}]}',
+      true
+    );
+    expect(out).toContain('"group_dup"');
+    expect(out).toContain('"group_dup_2"');
+  });
+
+  it("emits api_version for a beta URL and omits it for v1.0", () => {
+    const beta = generateTerraformSnippet(
+      "POST",
+      "https://graph.microsoft.com/beta/groups",
+      '{"displayName":"X"}',
+      ""
+    );
+    expect(beta).toContain('api_version = "beta"');
+
+    const v1 = generateTerraformSnippet("POST", URL, '{"displayName":"X"}', "");
+    expect(v1).not.toContain("api_version");
+  });
+});
