@@ -13,6 +13,8 @@ import {
   hashUrl,
   leafCollectionName,
   tryParseJson,
+  parseODataContext,
+  generateTerraformBatchSnippet,
 } from "./client.js";
 
 const GUID = "12345678-1234-1234-1234-123456789012";
@@ -567,5 +569,289 @@ describe("generateTerraformSnippet", () => {
 
     const v1 = generateTerraformSnippet("POST", URL, '{"displayName":"X"}', "");
     expect(v1).not.toContain("api_version");
+  });
+});
+
+describe("parseODataContext", () => {
+  it("parses a collection context into path + beta api version", () => {
+    expect(
+      parseODataContext(
+        "https://graph.microsoft.com/beta/$metadata#identity/identityProviders"
+      )
+    ).toEqual({ url: "identity/identityProviders", apiVersion: "beta" });
+  });
+
+  it("reports null api version for a v1.0 context", () => {
+    expect(
+      parseODataContext("https://graph.microsoft.com/v1.0/$metadata#groups")
+    ).toEqual({ url: "groups", apiVersion: null });
+  });
+
+  it("strips a trailing /$entity single-entity marker", () => {
+    expect(
+      parseODataContext("https://graph.microsoft.com/v1.0/$metadata#groups/$entity")
+    ).toEqual({ url: "groups", apiVersion: null });
+  });
+
+  it("strips projection and key-selector parens", () => {
+    expect(
+      parseODataContext(
+        "https://graph.microsoft.com/v1.0/$metadata#users(id,displayName)"
+      )
+    ).toEqual({ url: "users", apiVersion: null });
+    expect(
+      parseODataContext("https://graph.microsoft.com/v1.0/$metadata#groups('abc')")
+    ).toEqual({ url: "groups", apiVersion: null });
+  });
+
+  it("returns null when the $metadata marker is missing", () => {
+    expect(parseODataContext("https://graph.microsoft.com/v1.0/groups")).toBeNull();
+  });
+
+  it("returns null for non-string input", () => {
+    expect(parseODataContext(null)).toBeNull();
+    expect(parseODataContext(undefined)).toBeNull();
+    expect(parseODataContext(42)).toBeNull();
+  });
+
+  it("returns null when the fragment is empty", () => {
+    expect(parseODataContext("https://graph.microsoft.com/v1.0/$metadata#")).toBeNull();
+  });
+});
+
+// The real $batch response payload provided for this feature.
+const IDENTITY_PROVIDERS_BATCH = JSON.stringify({
+  responses: [
+    {
+      id: "38e548c6-045f-4a4a-9b18-b8d8644cf94e",
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: {
+        "@odata.context":
+          "https://graph.microsoft.com/beta/$metadata#identity/identityProviders",
+        value: [
+          {
+            "@odata.type": "#microsoft.graph.socialIdentityProvider",
+            id: "5a415368-09cf-42df-a00c-ec23d9f4ebce",
+            displayName: "Facebook",
+            supportedTenantTypes: "externalId",
+            identityProviderType: "Facebook",
+            clientId: "1515151515151515",
+            clientSecret: "******",
+          },
+          {
+            "@odata.type": "#microsoft.graph.oidcIdentityProvider",
+            id: "6d5887a6-131d-44a6-95ed-ff8c2cd57f42",
+            displayName: "WorkforceEntraId",
+            supportedTenantTypes: "externalId",
+            clientId: "a9a9a9a9-a9a9-a9a9-a9a9-a9a9a9a9a9a9",
+            issuer:
+              "https://login.microsoftonline.com/c5c5c5c5-c5c5-c5c5-c5c5-c5c5c5c5c5c5/v2.0",
+            responseType: "code",
+            scope: "openid profile",
+            clientAuthentication: {
+              "@odata.type": "#microsoft.graph.oidcClientSecretAuthentication",
+              clientSecret: "******",
+            },
+          },
+        ],
+      },
+    },
+  ],
+});
+
+describe("generateTerraformBatchSnippet", () => {
+  it("generates one adopt block per resource in the provided identityProviders payload", () => {
+    const out = generateTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    const blocks = out.split("\n\n");
+    expect(blocks).toHaveLength(2);
+  });
+
+  it("derives url and beta api_version from @odata.context", () => {
+    const out = generateTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    expect(out).toContain('url = "identity/identityProviders"');
+    expect(out).toContain('api_version = "beta"');
+  });
+
+  it("preserves @odata.type discriminators and strips read-only ids", () => {
+    const out = generateTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    // (HCL aligns the `=`, so match the quoted key + value without assuming spacing)
+    expect(out).toContain('"@odata.type"');
+    expect(out).toContain('"#microsoft.graph.oidcIdentityProvider"');
+    expect(out).toContain('"#microsoft.graph.socialIdentityProvider"');
+    // nested discriminator preserved
+    expect(out).toContain('"#microsoft.graph.oidcClientSecretAuthentication"');
+    expect(out).not.toContain("5a415368-09cf-42df-a00c-ec23d9f4ebce"); // top-level id stripped
+  });
+
+  it("keeps non-read-only fields such as clientSecret", () => {
+    const out = generateTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    expect(out).toMatch(/clientSecret\s+=\s+"\*{6}"/);
+  });
+
+  it("prepends a GET/adopt warning to every block", () => {
+    const out = generateTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    const warnings = out.match(/# WARNING: Generated from a GET response/g);
+    expect(warnings).toHaveLength(2);
+  });
+
+  it("derives labels from displayName", () => {
+    const out = generateTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    expect(out).toContain('"identity_providers_facebook"');
+    expect(out).toContain('"identity_providers_workforce_entra_id"');
+  });
+
+  it("returns null for an invalid or non-batch response envelope", () => {
+    expect(generateTerraformBatchSnippet("", "not json")).toBeNull();
+    expect(generateTerraformBatchSnippet("", "{}")).toBeNull();
+    expect(generateTerraformBatchSnippet("", '{"value":[]}')).toBeNull();
+  });
+
+  it("skips non-2xx sub-responses", () => {
+    const envelope = JSON.stringify({
+      responses: [
+        {
+          id: "1",
+          status: 404,
+          body: {
+            "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#groups/$entity",
+            displayName: "Missing",
+          },
+        },
+        {
+          id: "2",
+          status: 200,
+          body: {
+            "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#groups/$entity",
+            displayName: "Present",
+          },
+        },
+      ],
+    });
+    const out = generateTerraformBatchSnippet("", envelope);
+    expect(out).toContain('"group_present"');
+    expect(out).not.toContain("Missing");
+  });
+
+  it("handles a single-entity body (no value array)", () => {
+    const envelope = JSON.stringify({
+      responses: [
+        {
+          id: "1",
+          status: 200,
+          body: {
+            "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#groups/$entity",
+            id: GUID,
+            displayName: "Solo",
+          },
+        },
+      ],
+    });
+    const out = generateTerraformBatchSnippet("", envelope);
+    expect(out.split("\n\n")).toHaveLength(1);
+    expect(out).toContain('"group_solo"');
+    expect(out).toContain('url = "groups"');
+    expect(out).not.toContain(GUID);
+  });
+
+  it("falls back to the paired request url when @odata.context is absent", () => {
+    const requestBody = JSON.stringify({
+      requests: [{ id: "42", method: "GET", url: "/groups" }],
+    });
+    const responseBody = JSON.stringify({
+      responses: [{ id: "42", status: 200, body: { displayName: "FromReq" } }],
+    });
+    const out = generateTerraformBatchSnippet(requestBody, responseBody);
+    expect(out).toContain('url = "groups"');
+    expect(out).toContain('"group_from_req"'); // sanitizeLabel("FromReq") -> from_req
+  });
+
+  it("skips responses with no resolvable url and no body fields", () => {
+    const responseBody = JSON.stringify({
+      responses: [
+        { id: "1", status: 200, body: { displayName: "NoContext" } },
+      ],
+    });
+    // no @odata.context and no matching request => skipped
+    expect(generateTerraformBatchSnippet("", responseBody)).toBeNull();
+  });
+
+  it("skips an item that is empty after stripping read-only fields", () => {
+    const responseBody = JSON.stringify({
+      responses: [
+        {
+          id: "1",
+          status: 200,
+          body: {
+            "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#groups/$entity",
+            id: GUID,
+          },
+        },
+      ],
+    });
+    expect(generateTerraformBatchSnippet("", responseBody)).toBeNull();
+  });
+
+  it("de-duplicates labels across responses", () => {
+    const responseBody = JSON.stringify({
+      responses: [
+        {
+          id: "1",
+          status: 200,
+          body: {
+            "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#groups/$entity",
+            displayName: "Dup",
+          },
+        },
+        {
+          id: "2",
+          status: 200,
+          body: {
+            "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#groups/$entity",
+            displayName: "Dup",
+          },
+        },
+      ],
+    });
+    const out = generateTerraformBatchSnippet("", responseBody);
+    expect(out).toContain('"group_dup"');
+    expect(out).toContain('"group_dup_2"');
+  });
+});
+
+describe("generateTerraformSnippet ($batch integration)", () => {
+  const BATCH_URL = "https://graph.microsoft.com/beta/$batch";
+
+  it("produces adopt blocks for a $batch when the experimental flag is set", () => {
+    const out = generateTerraformSnippet(
+      "POST",
+      BATCH_URL,
+      "",
+      IDENTITY_PROVIDERS_BATCH,
+      true
+    );
+    expect(out.split("\n\n")).toHaveLength(2);
+    expect(out).toContain('url = "identity/identityProviders"');
+  });
+
+  it("returns null for a $batch without the experimental flag", () => {
+    expect(
+      generateTerraformSnippet("POST", BATCH_URL, "", IDENTITY_PROVIDERS_BATCH)
+    ).toBeNull();
+  });
+
+  it("does not render the request envelope as a resource", () => {
+    const requestBody = JSON.stringify({
+      requests: [{ id: "1", method: "GET", url: "/identity/identityProviders" }],
+    });
+    const out = generateTerraformSnippet(
+      "POST",
+      BATCH_URL,
+      requestBody,
+      IDENTITY_PROVIDERS_BATCH,
+      true
+    );
+    expect(out).not.toContain('"requests"');
+    expect(out).not.toContain("$batch");
   });
 });

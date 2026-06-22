@@ -305,9 +305,90 @@ function tryParseJson(text) {
   }
 }
 
+// Parse a Graph @odata.context into the resource path and api version, mirroring
+// normalizeTerraformUrl's return shape. e.g.
+//   https://graph.microsoft.com/beta/$metadata#identity/identityProviders
+//     -> { url: "identity/identityProviders", apiVersion: "beta" }
+//   https://graph.microsoft.com/v1.0/$metadata#groups/$entity
+//     -> { url: "groups", apiVersion: null }
+function parseODataContext(context) {
+  if (typeof context !== "string") return null;
+  const marker = context.indexOf("$metadata#");
+  if (marker === -1) return null;
+
+  const before = context.slice(0, marker);
+  const apiVersion = /\/beta\//i.test(before) ? "beta" : null;
+
+  const fragment = context
+    .slice(marker + "$metadata#".length)
+    .replace(/\([^)]*\)/g, "") // strip projection / key-selector parens
+    .replace(/\/\$entity$/i, "") // strip trailing single-entity marker
+    .replace(/^\/+|\/+$/g, "");
+
+  if (!fragment) return null;
+  return { url: fragment, apiVersion };
+}
+
+// Generate terraform "adopt" templates from a Graph $batch response envelope.
+// Each successful sub-response body yields one msgraph_resource block per resource,
+// with the path/version taken from @odata.context (falling back to the paired request).
+function generateTerraformBatchSnippet(requestBody, responseBody) {
+  const responseEnvelope = tryParseJson(responseBody);
+  if (!responseEnvelope || !Array.isArray(responseEnvelope.responses)) return null;
+
+  const requestEnvelope = tryParseJson(requestBody);
+  const requestsById = {};
+  if (requestEnvelope && Array.isArray(requestEnvelope.requests)) {
+    for (const req of requestEnvelope.requests) {
+      if (req && req.id != null) requestsById[String(req.id)] = req;
+    }
+  }
+
+  const used = new Set();
+  const blocks = [];
+
+  for (const resp of responseEnvelope.responses) {
+    if (!resp || typeof resp !== "object") continue;
+    if (typeof resp.status === "number" && (resp.status < 200 || resp.status >= 300)) continue;
+
+    const body = resp.body;
+    if (!body || typeof body !== "object") continue;
+
+    let target = parseODataContext(body["@odata.context"]);
+    if (!target) {
+      const req = requestsById[String(resp.id)];
+      if (req && typeof req.url === "string") {
+        target = normalizeTerraformUrl(req.url);
+      }
+    }
+    if (!target || !target.url) continue;
+
+    const items = Array.isArray(body.value) ? body.value : [body];
+    items.forEach((item, idx) => {
+      if (!item || typeof item !== "object") return;
+      const cleaned = stripReadOnlyFields(item);
+      if (!cleaned || Object.keys(cleaned).length === 0) return;
+      const baseLabel = buildResourceLabel(target.url, item, `${resp.id}#${idx}`);
+      const label = uniqueLabel(baseLabel, used);
+      const block = renderTerraformBlock(label, target.url, target.apiVersion, cleaned);
+      blocks.push(prependGetWarning(block));
+    });
+  }
+
+  if (blocks.length === 0) return null;
+  return blocks.join("\n\n");
+}
+
 function generateTerraformSnippet(method, url, requestBody, responseBody, experimentalCreateFromGet = false) {
   const methodUpper = (method || "GET").toUpperCase();
   if (methodUpper === "DELETE" || methodUpper === "OPTIONS") return null;
+
+  // $batch: adopt resources from the sub-response bodies, not the batch envelope.
+  if (typeof url === "string" && url.includes("/$batch")) {
+    if (!experimentalCreateFromGet) return null; // gated like single-resource GET adoption
+    return generateTerraformBatchSnippet(requestBody, responseBody);
+  }
+
   if (methodUpper === "GET" && !experimentalCreateFromGet) return null;
 
   const source =
@@ -740,4 +821,6 @@ export {
   prependGetWarning,
   uniqueLabel,
   tryParseJson,
+  parseODataContext,
+  generateTerraformBatchSnippet,
 };
