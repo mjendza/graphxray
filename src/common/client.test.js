@@ -15,6 +15,8 @@ import {
   tryParseJson,
   parseODataContext,
   generateLocalTerraformBatchSnippet,
+  rewriteReferences,
+  rawHcl,
 } from "./client.js";
 
 const GUID = "12345678-1234-1234-1234-123456789012";
@@ -662,19 +664,19 @@ const IDENTITY_PROVIDERS_BATCH = JSON.stringify({
 
 describe("generateLocalTerraformBatchSnippet", () => {
   it("generates one adopt block per resource in the provided identityProviders payload", () => {
-    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH, true);
     const blocks = out.split("\n\n");
     expect(blocks).toHaveLength(2);
   });
 
   it("derives url and beta api_version from @odata.context", () => {
-    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH, true);
     expect(out).toContain('url = "identity/identityProviders"');
     expect(out).toContain('api_version = "beta"');
   });
 
   it("preserves @odata.type discriminators and strips read-only ids", () => {
-    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH, true);
     // (HCL aligns the `=`, so match the quoted key + value without assuming spacing)
     expect(out).toContain('"@odata.type"');
     expect(out).toContain('"#microsoft.graph.oidcIdentityProvider"');
@@ -685,18 +687,18 @@ describe("generateLocalTerraformBatchSnippet", () => {
   });
 
   it("keeps non-read-only fields such as clientSecret", () => {
-    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH, true);
     expect(out).toMatch(/clientSecret\s+=\s+"\*{6}"/);
   });
 
   it("prepends a GET/adopt warning to every block", () => {
-    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH, true);
     const warnings = out.match(/# WARNING: Generated from a GET response/g);
     expect(warnings).toHaveLength(2);
   });
 
   it("derives labels from displayName", () => {
-    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH, true);
     expect(out).toContain('"identity_providers_facebook"');
     expect(out).toContain('"identity_providers_workforce_entra_id"');
   });
@@ -728,7 +730,7 @@ describe("generateLocalTerraformBatchSnippet", () => {
         },
       ],
     });
-    const out = generateLocalTerraformBatchSnippet("", envelope);
+    const out = generateLocalTerraformBatchSnippet("", envelope, true);
     expect(out).toContain('"group_present"');
     expect(out).not.toContain("Missing");
   });
@@ -747,7 +749,7 @@ describe("generateLocalTerraformBatchSnippet", () => {
         },
       ],
     });
-    const out = generateLocalTerraformBatchSnippet("", envelope);
+    const out = generateLocalTerraformBatchSnippet("", envelope, true);
     expect(out.split("\n\n")).toHaveLength(1);
     expect(out).toContain('"group_solo"');
     expect(out).toContain('url = "groups"');
@@ -761,7 +763,7 @@ describe("generateLocalTerraformBatchSnippet", () => {
     const responseBody = JSON.stringify({
       responses: [{ id: "42", status: 200, body: { displayName: "FromReq" } }],
     });
-    const out = generateLocalTerraformBatchSnippet(requestBody, responseBody);
+    const out = generateLocalTerraformBatchSnippet(requestBody, responseBody, true);
     expect(out).toContain('url = "groups"');
     expect(out).toContain('"group_from_req"'); // sanitizeLabel("FromReq") -> from_req
   });
@@ -773,7 +775,7 @@ describe("generateLocalTerraformBatchSnippet", () => {
       ],
     });
     // no @odata.context and no matching request => skipped
-    expect(generateLocalTerraformBatchSnippet("", responseBody)).toBeNull();
+    expect(generateLocalTerraformBatchSnippet("", responseBody, true)).toBeNull();
   });
 
   it("skips an item that is empty after stripping read-only fields", () => {
@@ -789,7 +791,7 @@ describe("generateLocalTerraformBatchSnippet", () => {
         },
       ],
     });
-    expect(generateLocalTerraformBatchSnippet("", responseBody)).toBeNull();
+    expect(generateLocalTerraformBatchSnippet("", responseBody, true)).toBeNull();
   });
 
   it("de-duplicates labels across responses", () => {
@@ -813,7 +815,7 @@ describe("generateLocalTerraformBatchSnippet", () => {
         },
       ],
     });
-    const out = generateLocalTerraformBatchSnippet("", responseBody);
+    const out = generateLocalTerraformBatchSnippet("", responseBody, true);
     expect(out).toContain('"group_dup"');
     expect(out).toContain('"group_dup_2"');
   });
@@ -853,5 +855,207 @@ describe("generateLocalTerraformSnippet ($batch integration)", () => {
     );
     expect(out).not.toContain('"requests"');
     expect(out).not.toContain("$batch");
+  });
+});
+
+describe("stripReadOnlyFields (source-aware)", () => {
+  it("strips expanded server-computed top-level fields by default", () => {
+    const out = stripReadOnlyFields({
+      appId: "abc",
+      servicePrincipalType: "Application",
+      publisherName: "Contoso",
+      displayName: "Keep me",
+    });
+    expect(out).toEqual({ displayName: "Keep me" });
+  });
+
+  it("keeps server-computed keys when stripReadOnlyKeys is false but always strips id", () => {
+    const body = { id: GUID, appId: "abc", displayName: "App" };
+    expect(stripReadOnlyFields(body, 0, { stripReadOnlyKeys: false })).toEqual({
+      appId: "abc",
+      displayName: "App",
+    });
+  });
+
+  it("still strips @odata annotations even when stripReadOnlyKeys is false", () => {
+    const out = stripReadOnlyFields(
+      { "@odata.context": "x", "@odata.type": "#t", displayName: "App" },
+      0,
+      { stripReadOnlyKeys: false }
+    );
+    expect(out).toEqual({ "@odata.type": "#t", displayName: "App" });
+  });
+});
+
+describe("rawHcl / formatHclValue raw expressions", () => {
+  it("emits a rawHcl marker verbatim (unquoted)", () => {
+    expect(formatHclValue(rawHcl("msgraph_resource.group_x.id"), "")).toBe(
+      "msgraph_resource.group_x.id"
+    );
+  });
+
+  it("renders a raw reference inside an object without quotes", () => {
+    const out = formatHclValue({ owner: rawHcl("msgraph_resource.user_a.id") }, "");
+    expect(out).toContain("owner = msgraph_resource.user_a.id");
+    expect(out).not.toContain('"msgraph_resource');
+  });
+});
+
+describe("rewriteReferences", () => {
+  const idToLabel = { [GUID.toLowerCase()]: "group_x" };
+
+  it("rewrites a bare GUID string into a raw reference expression", () => {
+    expect(rewriteReferences(GUID, idToLabel)).toEqual(
+      rawHcl("msgraph_resource.group_x.id")
+    );
+  });
+
+  it("rewrites a GUID embedded in an @odata.bind URL into an interpolation", () => {
+    const bind = `https://graph.microsoft.com/v1.0/directoryObjects/${GUID}`;
+    expect(rewriteReferences({ "owners@odata.bind": [bind] }, idToLabel)).toEqual({
+      "owners@odata.bind": [
+        "https://graph.microsoft.com/v1.0/directoryObjects/${msgraph_resource.group_x.id}",
+      ],
+    });
+  });
+
+  it("leaves GUIDs that are not emitted in the snippet untouched", () => {
+    const other = "99999999-9999-9999-9999-999999999999";
+    expect(rewriteReferences(other, idToLabel)).toBe(other);
+    expect(rewriteReferences({ ref: other }, idToLabel)).toEqual({ ref: other });
+  });
+
+  it("matches GUIDs case-insensitively", () => {
+    const upper = GUID.toUpperCase();
+    expect(rewriteReferences(upper, idToLabel)).toEqual(
+      rawHcl("msgraph_resource.group_x.id")
+    );
+  });
+});
+
+describe("generateLocalTerraformSnippet (cross-resource references)", () => {
+  it("rewrites an @odata.bind to a sibling resource emitted in the same snippet", () => {
+    const aId = GUID;
+    const responseBody = JSON.stringify({
+      value: [
+        { id: aId, displayName: "Alice" },
+        {
+          id: "22222222-2222-2222-2222-222222222222",
+          displayName: "Bob",
+          "manager@odata.bind": `https://graph.microsoft.com/v1.0/directoryObjects/${aId}`,
+        },
+      ],
+    });
+    const out = generateLocalTerraformSnippet(
+      "GET",
+      "https://graph.microsoft.com/v1.0/users",
+      "",
+      responseBody,
+      true
+    );
+    expect(out).toContain("${msgraph_resource.user_alice.id}");
+    expect(out).not.toContain(`directoryObjects/${aId}`);
+  });
+});
+
+describe("generateLocalTerraformBatchSnippet (method fidelity)", () => {
+  const POST_BATCH_REQUEST = JSON.stringify({
+    requests: [
+      {
+        id: "1",
+        method: "POST",
+        url: "/groups",
+        body: { displayName: "Engineering", mailNickname: "eng", appId: "should-keep" },
+      },
+    ],
+  });
+  const POST_BATCH_RESPONSE = JSON.stringify({
+    responses: [
+      {
+        id: "1",
+        status: 201,
+        body: {
+          "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#groups/$entity",
+          id: GUID,
+          displayName: "Engineering",
+          mailNickname: "eng",
+        },
+      },
+    ],
+  });
+
+  it("treats a POST sub-request as a real create: request body, no warning", () => {
+    const out = generateLocalTerraformBatchSnippet(POST_BATCH_REQUEST, POST_BATCH_RESPONSE);
+    expect(out).toContain('"group_engineering"');
+    expect(out).toContain('url = "groups"');
+    expect(out).not.toContain("# WARNING");
+    // request body is authoritative and kept as-is (not stripped like a GET response)
+    expect(out).toContain("appId");
+    expect(out).toContain("should-keep");
+  });
+
+  it("emits POST creates even without the experimental flag", () => {
+    const out = generateLocalTerraformBatchSnippet(POST_BATCH_REQUEST, POST_BATCH_RESPONSE);
+    expect(out).not.toBeNull();
+    expect(out).toContain('"group_engineering"');
+  });
+
+  it("suppresses GET-derived items when the flag is off but keeps POST creates", () => {
+    const requestBody = JSON.stringify({
+      requests: [
+        { id: "1", method: "POST", url: "/groups", body: { displayName: "Made" } },
+        { id: "2", method: "GET", url: "/users" },
+      ],
+    });
+    const responseBody = JSON.stringify({
+      responses: [
+        {
+          id: "1",
+          status: 201,
+          body: {
+            "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#groups/$entity",
+            id: GUID,
+            displayName: "Made",
+          },
+        },
+        {
+          id: "2",
+          status: 200,
+          body: {
+            "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users",
+            value: [{ id: "33333333-3333-3333-3333-333333333333", displayName: "Read" }],
+          },
+        },
+      ],
+    });
+    const off = generateLocalTerraformBatchSnippet(requestBody, responseBody, false);
+    expect(off).toContain('"group_made"');
+    expect(off).not.toContain('"user_read"');
+
+    const on = generateLocalTerraformBatchSnippet(requestBody, responseBody, true);
+    expect(on).toContain('"group_made"');
+    expect(on).toContain('"user_read"');
+  });
+
+  it("falls back to the response body when a create sub-request has no body", () => {
+    const requestBody = JSON.stringify({
+      requests: [{ id: "1", method: "POST", url: "/groups" }],
+    });
+    const responseBody = JSON.stringify({
+      responses: [
+        {
+          id: "1",
+          status: 201,
+          body: {
+            "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#groups/$entity",
+            id: GUID,
+            displayName: "FromResp",
+          },
+        },
+      ],
+    });
+    const out = generateLocalTerraformBatchSnippet(requestBody, responseBody);
+    expect(out).toContain('"group_from_resp"');
+    expect(out).not.toContain("# WARNING"); // still a create, no warning
   });
 });

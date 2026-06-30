@@ -102,12 +102,27 @@ function generateLocalPowerShellSnippet(method, url, body, options = {}) {
 
 const GUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HCL_IDENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// `id` is the resource identity — server-assigned, never a valid `body` input
+// for msgraph_resource, and captured separately for cross-resource references.
+// It is always stripped from the emitted body (regardless of source).
+const TF_ALWAYS_STRIP_TOP_KEYS = new Set(["id"]);
+
 const TF_READONLY_KEYS = new Set([
-  "id",
   "createdDateTime",
   "deletedDateTime",
   "renewedDateTime",
   "modifiedDateTime",
+  // Commonly server-generated/computed fields that break `terraform apply` if
+  // sent back in a create body. Kept conservative — only fields that are
+  // server-only across the common Entra resource types.
+  "appId",
+  "servicePrincipalType",
+  "publisherName",
+  "provisioningErrors",
+  "onPremisesSyncEnabled",
+  "onPremisesLastSyncDateTime",
+  "proxyAddresses",
+  "imAddresses",
 ]);
 
 const TF_STRIP_ODATA_SUFFIXES = [
@@ -158,16 +173,22 @@ function shouldStripOdataKey(key) {
   );
 }
 
-function stripReadOnlyFields(value, depth = 0) {
+function stripReadOnlyFields(value, depth = 0, opts = {}) {
+  // `@odata.*` annotations are always stripped (never valid in a request body).
+  // `TF_READONLY_KEYS` are stripped only for server-derived sources
+  // (stripReadOnlyKeys defaults to true); a user-authored create request body
+  // is trusted and passes stripReadOnlyKeys: false to keep its fields intact.
+  const stripReadOnlyKeys = opts.stripReadOnlyKeys !== false;
   if (Array.isArray(value)) {
-    return value.map((item) => stripReadOnlyFields(item, depth + 1));
+    return value.map((item) => stripReadOnlyFields(item, depth + 1, opts));
   }
   if (value !== null && typeof value === "object") {
     const out = {};
     for (const [k, v] of Object.entries(value)) {
       if (shouldStripOdataKey(k)) continue;
-      if (depth === 0 && TF_READONLY_KEYS.has(k)) continue;
-      out[k] = stripReadOnlyFields(v, depth + 1);
+      if (depth === 0 && TF_ALWAYS_STRIP_TOP_KEYS.has(k)) continue;
+      if (depth === 0 && stripReadOnlyKeys && TF_READONLY_KEYS.has(k)) continue;
+      out[k] = stripReadOnlyFields(v, depth + 1, opts);
     }
     return out;
   }
@@ -184,11 +205,20 @@ function formatHclString(str) {
   return `"${escaped}"`;
 }
 
+// Wrap a string so formatHclValue emits it verbatim (unquoted), e.g. a
+// Terraform reference like `msgraph_resource.group_x.id`.
+function rawHcl(expr) {
+  return { __hclRaw: String(expr) };
+}
+
 function formatHclValue(value, indent) {
   if (value === null || value === undefined) return "null";
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "number") return String(value);
   if (typeof value === "string") return formatHclString(value);
+  if (value && typeof value === "object" && typeof value.__hclRaw === "string") {
+    return value.__hclRaw;
+  }
 
   if (Array.isArray(value)) {
     if (value.length === 0) return "[]";
@@ -322,7 +352,76 @@ function parseODataContext(context) {
   return { url: fragment, apiVersion };
 }
 
-function generateLocalTerraformBatchSnippet(requestBody, responseBody) {
+const GUID_GLOBAL_REGEX = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+// Rewrite literal GUIDs that match a resource emitted in the same snippet into
+// Terraform references, so generated blocks express their dependency graph:
+//   - a string that is exactly a known GUID  -> raw `msgraph_resource.<label>.id`
+//   - a GUID embedded in a string (e.g. an `*@odata.bind` URL) -> `${...}` interpolation
+// GUIDs not present in idToLabel are left untouched.
+function rewriteReferences(value, idToLabel) {
+  if (Array.isArray(value)) {
+    return value.map((v) => rewriteReferences(v, idToLabel));
+  }
+  if (value !== null && typeof value === "object") {
+    if (typeof value.__hclRaw === "string") return value; // already a raw expression
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = rewriteReferences(v, idToLabel);
+    }
+    return out;
+  }
+  if (typeof value === "string") {
+    const exactLabel = idToLabel[value.toLowerCase()];
+    if (GUID_REGEX.test(value) && exactLabel) {
+      return rawHcl(`msgraph_resource.${exactLabel}.id`);
+    }
+    let changed = false;
+    const replaced = value.replace(GUID_GLOBAL_REGEX, (guid) => {
+      const label = idToLabel[guid.toLowerCase()];
+      if (!label) return guid;
+      changed = true;
+      return `\${msgraph_resource.${label}.id}`;
+    });
+    return changed ? replaced : value;
+  }
+  return value;
+}
+
+// Shared two-pass renderer for both the single-request and $batch paths.
+// A unit is { item, url, apiVersion, treatAsCreate, seed }:
+//   - treatAsCreate true  => user-authored create body: keep read-only keys, no warning
+//   - treatAsCreate false => server/GET-derived body: strip read-only keys, add warning
+// Pass 1 assigns unique labels and maps each item's id -> label (across all
+// units) so Pass 2 can rewrite cross-resource references.
+function renderResourceUnits(units) {
+  const used = new Set();
+  const idToLabel = {};
+  const prepared = [];
+
+  for (const unit of units) {
+    const { item, url, apiVersion, treatAsCreate, seed } = unit;
+    if (!item || typeof item !== "object") continue;
+    const cleaned = stripReadOnlyFields(item, 0, { stripReadOnlyKeys: !treatAsCreate });
+    if (!cleaned || Object.keys(cleaned).length === 0) continue;
+    const baseLabel = buildResourceLabel(url, item, seed);
+    const label = uniqueLabel(baseLabel, used);
+    if (typeof item.id === "string" && GUID_REGEX.test(item.id)) {
+      idToLabel[item.id.toLowerCase()] = label;
+    }
+    prepared.push({ label, url, apiVersion, cleaned, treatAsCreate });
+  }
+
+  const blocks = [];
+  for (const p of prepared) {
+    const body = rewriteReferences(p.cleaned, idToLabel);
+    const block = renderTerraformBlock(p.label, p.url, p.apiVersion, body);
+    blocks.push(p.treatAsCreate ? block : prependGetWarning(block));
+  }
+  return blocks;
+}
+
+function generateLocalTerraformBatchSnippet(requestBody, responseBody, experimentalCreateFromGet = false) {
   const responseEnvelope = tryParseJson(responseBody);
   if (!responseEnvelope || !Array.isArray(responseEnvelope.responses)) return null;
 
@@ -334,37 +433,63 @@ function generateLocalTerraformBatchSnippet(requestBody, responseBody) {
     }
   }
 
-  const used = new Set();
-  const blocks = [];
+  const units = [];
 
   for (const resp of responseEnvelope.responses) {
     if (!resp || typeof resp !== "object") continue;
     if (typeof resp.status === "number" && (resp.status < 200 || resp.status >= 300)) continue;
 
-    const body = resp.body;
-    if (!body || typeof body !== "object") continue;
+    const req = requestsById[String(resp.id)];
+    const reqMethod = req && typeof req.method === "string" ? req.method.toUpperCase() : null;
+    const isCreate = reqMethod === "POST" || reqMethod === "PUT" || reqMethod === "PATCH";
 
-    let target = parseODataContext(body["@odata.context"]);
-    if (!target) {
-      const req = requestsById[String(resp.id)];
-      if (req && typeof req.url === "string") {
+    // GET-derived sub-resources are adoption — keep them gated behind the flag,
+    // consistent with single-request GET handling. Real creates are always emitted.
+    if (!isCreate && !experimentalCreateFromGet) continue;
+
+    let source = null;
+    let target = null;
+
+    if (isCreate) {
+      // Prefer the request payload — the authoritative create body.
+      const reqBody = req && req.body != null ? req.body : null;
+      const parsedReqBody = typeof reqBody === "string" ? tryParseJson(reqBody) : reqBody;
+      source =
+        parsedReqBody && typeof parsedReqBody === "object"
+          ? parsedReqBody
+          : resp.body && typeof resp.body === "object"
+          ? resp.body
+          : null;
+      if (typeof req.url === "string") target = normalizeTerraformUrl(req.url);
+      if ((!target || !target.url) && resp.body && typeof resp.body === "object") {
+        target = parseODataContext(resp.body["@odata.context"]);
+      }
+    } else {
+      const body = resp.body;
+      if (!body || typeof body !== "object") continue;
+      source = body;
+      target = parseODataContext(body["@odata.context"]);
+      if ((!target || !target.url) && req && typeof req.url === "string") {
         target = normalizeTerraformUrl(req.url);
       }
     }
+
+    if (!source || typeof source !== "object") continue;
     if (!target || !target.url) continue;
 
-    const items = Array.isArray(body.value) ? body.value : [body];
+    const items = Array.isArray(source.value) ? source.value : [source];
     items.forEach((item, idx) => {
-      if (!item || typeof item !== "object") return;
-      const cleaned = stripReadOnlyFields(item);
-      if (!cleaned || Object.keys(cleaned).length === 0) return;
-      const baseLabel = buildResourceLabel(target.url, item, `${resp.id}#${idx}`);
-      const label = uniqueLabel(baseLabel, used);
-      const block = renderTerraformBlock(label, target.url, target.apiVersion, cleaned);
-      blocks.push(prependGetWarning(block));
+      units.push({
+        item,
+        url: target.url,
+        apiVersion: target.apiVersion,
+        treatAsCreate: isCreate,
+        seed: `${resp.id}#${idx}`,
+      });
     });
   }
 
+  const blocks = renderResourceUnits(units);
   if (blocks.length === 0) return null;
   return blocks.join("\n\n");
 }
@@ -374,36 +499,32 @@ function generateLocalTerraformSnippet(method, url, requestBody, responseBody, e
   if (methodUpper === "DELETE" || methodUpper === "OPTIONS") return null;
 
   // $batch: adopt resources from the sub-response bodies, not the batch envelope.
+  // The batch generator decides per sub-request whether each item is a real
+  // create (always emitted) or GET-derived adoption (gated by the flag).
   if (typeof url === "string" && url.includes("/$batch")) {
-    if (!experimentalCreateFromGet) return null; // gated like single-resource GET adoption
-    return generateLocalTerraformBatchSnippet(requestBody, responseBody);
+    return generateLocalTerraformBatchSnippet(requestBody, responseBody, experimentalCreateFromGet);
   }
 
   if (methodUpper === "GET" && !experimentalCreateFromGet) return null;
 
-  const source =
-    methodUpper === "GET" ? responseBody || requestBody : requestBody || responseBody;
+  const isCreate = methodUpper !== "GET";
+  const source = isCreate ? requestBody || responseBody : responseBody || requestBody;
   const parsed = tryParseJson(source);
   if (parsed === null || typeof parsed !== "object") return null;
 
   const { url: normalizedUrl, apiVersion } = normalizeTerraformUrl(url);
   if (!normalizedUrl) return null;
 
-  const used = new Set();
-  const items =
-    parsed && Array.isArray(parsed.value) ? parsed.value : [parsed];
+  const items = Array.isArray(parsed.value) ? parsed.value : [parsed];
+  const units = items.map((item, idx) => ({
+    item,
+    url: normalizedUrl,
+    apiVersion,
+    treatAsCreate: isCreate,
+    seed: `${url}#${idx}`,
+  }));
 
-  const blocks = [];
-  items.forEach((item, idx) => {
-    if (!item || typeof item !== "object") return;
-    const cleaned = stripReadOnlyFields(item);
-    if (!cleaned || Object.keys(cleaned).length === 0) return;
-    const baseLabel = buildResourceLabel(normalizedUrl, item, `${url}#${idx}`);
-    const label = uniqueLabel(baseLabel, used);
-    const block = renderTerraformBlock(label, normalizedUrl, apiVersion, cleaned);
-    blocks.push(methodUpper === "GET" ? prependGetWarning(block) : block);
-  });
-
+  const blocks = renderResourceUnits(units);
   if (blocks.length === 0) return null;
   return blocks.join("\n\n");
 }
@@ -812,4 +933,6 @@ export {
   tryParseJson,
   parseODataContext,
   generateLocalTerraformBatchSnippet,
+  rewriteReferences,
+  rawHcl,
 };
