@@ -109,8 +109,7 @@ const TF_READONLY_KEYS = new Set([
   "renewedDateTime",
   "modifiedDateTime",
 ]);
-// @odata annotations that are server-generated and should be stripped from a recreate template.
-// Anything not listed here (notably @odata.type discriminators and *@odata.bind references) is kept.
+
 const TF_STRIP_ODATA_SUFFIXES = [
   "@odata.context",
   "@odata.nextLink",
@@ -305,12 +304,6 @@ function tryParseJson(text) {
   }
 }
 
-// Parse a Graph @odata.context into the resource path and api version, mirroring
-// normalizeTerraformUrl's return shape. e.g.
-//   https://graph.microsoft.com/beta/$metadata#identity/identityProviders
-//     -> { url: "identity/identityProviders", apiVersion: "beta" }
-//   https://graph.microsoft.com/v1.0/$metadata#groups/$entity
-//     -> { url: "groups", apiVersion: null }
 function parseODataContext(context) {
   if (typeof context !== "string") return null;
   const marker = context.indexOf("$metadata#");
@@ -329,10 +322,7 @@ function parseODataContext(context) {
   return { url: fragment, apiVersion };
 }
 
-// Generate terraform "adopt" templates from a Graph $batch response envelope.
-// Each successful sub-response body yields one msgraph_resource block per resource,
-// with the path/version taken from @odata.context (falling back to the paired request).
-function generateTerraformBatchSnippet(requestBody, responseBody) {
+function generateLocalTerraformBatchSnippet(requestBody, responseBody) {
   const responseEnvelope = tryParseJson(responseBody);
   if (!responseEnvelope || !Array.isArray(responseEnvelope.responses)) return null;
 
@@ -379,14 +369,14 @@ function generateTerraformBatchSnippet(requestBody, responseBody) {
   return blocks.join("\n\n");
 }
 
-function generateTerraformSnippet(method, url, requestBody, responseBody, experimentalCreateFromGet = false) {
+function generateLocalTerraformSnippet(method, url, requestBody, responseBody, experimentalCreateFromGet = false) {
   const methodUpper = (method || "GET").toUpperCase();
   if (methodUpper === "DELETE" || methodUpper === "OPTIONS") return null;
 
   // $batch: adopt resources from the sub-response bodies, not the batch envelope.
   if (typeof url === "string" && url.includes("/$batch")) {
     if (!experimentalCreateFromGet) return null; // gated like single-resource GET adoption
-    return generateTerraformBatchSnippet(requestBody, responseBody);
+    return generateLocalTerraformBatchSnippet(requestBody, responseBody);
   }
 
   if (methodUpper === "GET" && !experimentalCreateFromGet) return null;
@@ -428,9 +418,9 @@ async function getSnippetFromDevX(snippetLanguage, method, url, body, options = 
     return fullUrl;
   }
 
-  // Terraform (msgraph): always generate locally, DevX has no Terraform support
+
   if (snippetLanguage === "terraform") {
-    return generateTerraformSnippet(
+    return generateLocalTerraformSnippet(
       method,
       url,
       body ?? "",
@@ -804,9 +794,8 @@ const getCodeView = async function (
   console.log("CodeView", codeView);
   return codeView;
 };
-export { getPowershellCmd, getRequestBody, getResponseContent, getCodeView, getBatchCodeSnippets, generateLocalPowerShellSnippet, generateTerraformSnippet };
+export { getPowershellCmd, getRequestBody, getResponseContent, getCodeView, getBatchCodeSnippets, generateLocalPowerShellSnippet, generateLocalTerraformSnippet };
 
-// Terraform helpers exported for unit testing.
 export {
   hashUrl,
   sanitizeLabel,
@@ -822,5 +811,5 @@ export {
   uniqueLabel,
   tryParseJson,
   parseODataContext,
-  generateTerraformBatchSnippet,
+  generateLocalTerraformBatchSnippet,
 };

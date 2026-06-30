@@ -1,5 +1,5 @@
 import {
-  generateTerraformSnippet,
+  generateLocalTerraformSnippet,
   normalizeTerraformUrl,
   stripReadOnlyFields,
   formatHclValue,
@@ -14,7 +14,7 @@ import {
   leafCollectionName,
   tryParseJson,
   parseODataContext,
-  generateTerraformBatchSnippet,
+  generateLocalTerraformBatchSnippet,
 } from "./client.js";
 
 const GUID = "12345678-1234-1234-1234-123456789012";
@@ -436,22 +436,22 @@ describe("uniqueLabel", () => {
   });
 });
 
-describe("generateTerraformSnippet", () => {
+describe("generateLocalTerraformSnippet", () => {
   const URL = "https://graph.microsoft.com/v1.0/groups";
 
   it("returns null for DELETE and OPTIONS", () => {
-    expect(generateTerraformSnippet("DELETE", URL, "{}", "")).toBeNull();
-    expect(generateTerraformSnippet("OPTIONS", URL, "{}", "")).toBeNull();
+    expect(generateLocalTerraformSnippet("DELETE", URL, "{}", "")).toBeNull();
+    expect(generateLocalTerraformSnippet("OPTIONS", URL, "{}", "")).toBeNull();
   });
 
   it("returns null for GET without the experimental flag", () => {
     expect(
-      generateTerraformSnippet("GET", URL, "", '{"displayName":"X"}')
+      generateLocalTerraformSnippet("GET", URL, "", '{"displayName":"X"}')
     ).toBeNull();
   });
 
   it("generates a block from a GET response when the experimental flag is set, with a warning", () => {
-    const out = generateTerraformSnippet(
+    const out = generateLocalTerraformSnippet(
       "GET",
       URL,
       "",
@@ -464,7 +464,7 @@ describe("generateTerraformSnippet", () => {
   });
 
   it("produces an exact HCL block for a POST create", () => {
-    const out = generateTerraformSnippet(
+    const out = generateLocalTerraformSnippet(
       "POST",
       URL,
       '{"displayName":"Marketing"}',
@@ -481,7 +481,7 @@ describe("generateTerraformSnippet", () => {
   });
 
   it("does not add a warning for non-GET methods", () => {
-    const out = generateTerraformSnippet(
+    const out = generateLocalTerraformSnippet(
       "PATCH",
       URL,
       '{"displayName":"X"}',
@@ -491,12 +491,12 @@ describe("generateTerraformSnippet", () => {
   });
 
   it("falls back to responseBody for non-GET when requestBody is empty", () => {
-    const out = generateTerraformSnippet("POST", URL, "", '{"displayName":"X"}');
+    const out = generateLocalTerraformSnippet("POST", URL, "", '{"displayName":"X"}');
     expect(out).toContain('resource "msgraph_resource" "group_x"');
   });
 
   it("falls back to requestBody for GET when responseBody is empty", () => {
-    const out = generateTerraformSnippet(
+    const out = generateLocalTerraformSnippet(
       "GET",
       URL,
       '{"displayName":"X"}',
@@ -507,17 +507,17 @@ describe("generateTerraformSnippet", () => {
   });
 
   it("returns null for invalid / empty JSON", () => {
-    expect(generateTerraformSnippet("POST", URL, "not json", "")).toBeNull();
-    expect(generateTerraformSnippet("POST", URL, "", "")).toBeNull();
+    expect(generateLocalTerraformSnippet("POST", URL, "not json", "")).toBeNull();
+    expect(generateLocalTerraformSnippet("POST", URL, "", "")).toBeNull();
   });
 
   it("returns null for primitive (non-object) JSON", () => {
-    expect(generateTerraformSnippet("POST", URL, "123", "")).toBeNull();
-    expect(generateTerraformSnippet("POST", URL, '"a string"', "")).toBeNull();
+    expect(generateLocalTerraformSnippet("POST", URL, "123", "")).toBeNull();
+    expect(generateLocalTerraformSnippet("POST", URL, '"a string"', "")).toBeNull();
   });
 
   it("emits one block per item for a collection response", () => {
-    const out = generateTerraformSnippet(
+    const out = generateLocalTerraformSnippet(
       "GET",
       URL,
       "",
@@ -531,7 +531,7 @@ describe("generateTerraformSnippet", () => {
   });
 
   it("strips read-only and @odata fields from output", () => {
-    const out = generateTerraformSnippet(
+    const out = generateLocalTerraformSnippet(
       "POST",
       URL,
       `{"@odata.context":"ctx","id":"${GUID}","displayName":"X"}`,
@@ -543,11 +543,11 @@ describe("generateTerraformSnippet", () => {
   });
 
   it("returns null when every item is empty after stripping", () => {
-    expect(generateTerraformSnippet("POST", URL, `{"id":"${GUID}"}`, "")).toBeNull();
+    expect(generateLocalTerraformSnippet("POST", URL, `{"id":"${GUID}"}`, "")).toBeNull();
   });
 
   it("de-duplicates labels across collection items", () => {
-    const out = generateTerraformSnippet(
+    const out = generateLocalTerraformSnippet(
       "GET",
       URL,
       "",
@@ -559,7 +559,7 @@ describe("generateTerraformSnippet", () => {
   });
 
   it("emits api_version for a beta URL and omits it for v1.0", () => {
-    const beta = generateTerraformSnippet(
+    const beta = generateLocalTerraformSnippet(
       "POST",
       "https://graph.microsoft.com/beta/groups",
       '{"displayName":"X"}',
@@ -567,7 +567,7 @@ describe("generateTerraformSnippet", () => {
     );
     expect(beta).toContain('api_version = "beta"');
 
-    const v1 = generateTerraformSnippet("POST", URL, '{"displayName":"X"}', "");
+    const v1 = generateLocalTerraformSnippet("POST", URL, '{"displayName":"X"}', "");
     expect(v1).not.toContain("api_version");
   });
 });
@@ -660,21 +660,21 @@ const IDENTITY_PROVIDERS_BATCH = JSON.stringify({
   ],
 });
 
-describe("generateTerraformBatchSnippet", () => {
+describe("generateLocalTerraformBatchSnippet", () => {
   it("generates one adopt block per resource in the provided identityProviders payload", () => {
-    const out = generateTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
     const blocks = out.split("\n\n");
     expect(blocks).toHaveLength(2);
   });
 
   it("derives url and beta api_version from @odata.context", () => {
-    const out = generateTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
     expect(out).toContain('url = "identity/identityProviders"');
     expect(out).toContain('api_version = "beta"');
   });
 
   it("preserves @odata.type discriminators and strips read-only ids", () => {
-    const out = generateTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
     // (HCL aligns the `=`, so match the quoted key + value without assuming spacing)
     expect(out).toContain('"@odata.type"');
     expect(out).toContain('"#microsoft.graph.oidcIdentityProvider"');
@@ -685,26 +685,26 @@ describe("generateTerraformBatchSnippet", () => {
   });
 
   it("keeps non-read-only fields such as clientSecret", () => {
-    const out = generateTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
     expect(out).toMatch(/clientSecret\s+=\s+"\*{6}"/);
   });
 
   it("prepends a GET/adopt warning to every block", () => {
-    const out = generateTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
     const warnings = out.match(/# WARNING: Generated from a GET response/g);
     expect(warnings).toHaveLength(2);
   });
 
   it("derives labels from displayName", () => {
-    const out = generateTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
+    const out = generateLocalTerraformBatchSnippet("", IDENTITY_PROVIDERS_BATCH);
     expect(out).toContain('"identity_providers_facebook"');
     expect(out).toContain('"identity_providers_workforce_entra_id"');
   });
 
   it("returns null for an invalid or non-batch response envelope", () => {
-    expect(generateTerraformBatchSnippet("", "not json")).toBeNull();
-    expect(generateTerraformBatchSnippet("", "{}")).toBeNull();
-    expect(generateTerraformBatchSnippet("", '{"value":[]}')).toBeNull();
+    expect(generateLocalTerraformBatchSnippet("", "not json")).toBeNull();
+    expect(generateLocalTerraformBatchSnippet("", "{}")).toBeNull();
+    expect(generateLocalTerraformBatchSnippet("", '{"value":[]}')).toBeNull();
   });
 
   it("skips non-2xx sub-responses", () => {
@@ -728,7 +728,7 @@ describe("generateTerraformBatchSnippet", () => {
         },
       ],
     });
-    const out = generateTerraformBatchSnippet("", envelope);
+    const out = generateLocalTerraformBatchSnippet("", envelope);
     expect(out).toContain('"group_present"');
     expect(out).not.toContain("Missing");
   });
@@ -747,7 +747,7 @@ describe("generateTerraformBatchSnippet", () => {
         },
       ],
     });
-    const out = generateTerraformBatchSnippet("", envelope);
+    const out = generateLocalTerraformBatchSnippet("", envelope);
     expect(out.split("\n\n")).toHaveLength(1);
     expect(out).toContain('"group_solo"');
     expect(out).toContain('url = "groups"');
@@ -761,7 +761,7 @@ describe("generateTerraformBatchSnippet", () => {
     const responseBody = JSON.stringify({
       responses: [{ id: "42", status: 200, body: { displayName: "FromReq" } }],
     });
-    const out = generateTerraformBatchSnippet(requestBody, responseBody);
+    const out = generateLocalTerraformBatchSnippet(requestBody, responseBody);
     expect(out).toContain('url = "groups"');
     expect(out).toContain('"group_from_req"'); // sanitizeLabel("FromReq") -> from_req
   });
@@ -773,7 +773,7 @@ describe("generateTerraformBatchSnippet", () => {
       ],
     });
     // no @odata.context and no matching request => skipped
-    expect(generateTerraformBatchSnippet("", responseBody)).toBeNull();
+    expect(generateLocalTerraformBatchSnippet("", responseBody)).toBeNull();
   });
 
   it("skips an item that is empty after stripping read-only fields", () => {
@@ -789,7 +789,7 @@ describe("generateTerraformBatchSnippet", () => {
         },
       ],
     });
-    expect(generateTerraformBatchSnippet("", responseBody)).toBeNull();
+    expect(generateLocalTerraformBatchSnippet("", responseBody)).toBeNull();
   });
 
   it("de-duplicates labels across responses", () => {
@@ -813,17 +813,17 @@ describe("generateTerraformBatchSnippet", () => {
         },
       ],
     });
-    const out = generateTerraformBatchSnippet("", responseBody);
+    const out = generateLocalTerraformBatchSnippet("", responseBody);
     expect(out).toContain('"group_dup"');
     expect(out).toContain('"group_dup_2"');
   });
 });
 
-describe("generateTerraformSnippet ($batch integration)", () => {
+describe("generateLocalTerraformSnippet ($batch integration)", () => {
   const BATCH_URL = "https://graph.microsoft.com/beta/$batch";
 
   it("produces adopt blocks for a $batch when the experimental flag is set", () => {
-    const out = generateTerraformSnippet(
+    const out = generateLocalTerraformSnippet(
       "POST",
       BATCH_URL,
       "",
@@ -836,7 +836,7 @@ describe("generateTerraformSnippet ($batch integration)", () => {
 
   it("returns null for a $batch without the experimental flag", () => {
     expect(
-      generateTerraformSnippet("POST", BATCH_URL, "", IDENTITY_PROVIDERS_BATCH)
+      generateLocalTerraformSnippet("POST", BATCH_URL, "", IDENTITY_PROVIDERS_BATCH)
     ).toBeNull();
   });
 
@@ -844,7 +844,7 @@ describe("generateTerraformSnippet ($batch integration)", () => {
     const requestBody = JSON.stringify({
       requests: [{ id: "1", method: "GET", url: "/identity/identityProviders" }],
     });
-    const out = generateTerraformSnippet(
+    const out = generateLocalTerraformSnippet(
       "POST",
       BATCH_URL,
       requestBody,
