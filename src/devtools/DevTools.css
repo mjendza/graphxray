@@ -35,6 +35,15 @@ td, th {
   border-bottom: 1px solid #edebe9;
 }
 
+/* Search match highlight — reads on both the light URL theme and the dark
+   JSON/code blocks. */
+.gxr-search-hit {
+  background: #ffe58f;
+  color: #1b1b1b;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
 .gxr-filter-header {
   display: flex;
   align-items: center;

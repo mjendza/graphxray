@@ -1,12 +1,87 @@
 import React, { useState } from "react";
-import SyntaxHighlighter from "react-syntax-highlighter";
+import SyntaxHighlighter, { createElement } from "react-syntax-highlighter";
 import {
   atomOneDark,
   atomOneLight,
 } from "react-syntax-highlighter/dist/esm/styles/hljs";
 import { IconButton } from "@fluentui/react/lib/Button";
 
-const ColoredUrl = ({ url }) => {
+// Split plain text and wrap case-insensitive matches of `query` in a highlight
+// marker. Returns the original string when there is no query/match so callers
+// can use it transparently inside JSX text positions.
+const highlightText = (text, query) => {
+  if (typeof text !== "string" || !query) return text;
+  const q = query.trim();
+  if (!q) return text;
+  const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const segments = text.split(new RegExp(`(${escaped})`, "gi"));
+  if (segments.length === 1) return text;
+  // String.split with a capturing group yields matches at odd indices.
+  return segments.map((seg, i) =>
+    i % 2 === 1 ? (
+      <mark key={i} className="gxr-search-hit">{seg}</mark>
+    ) : (
+      seg
+    )
+  );
+};
+
+// Custom react-syntax-highlighter renderer that wraps case-insensitive matches
+// of `query` in a <mark> by transforming the token tree before it is rendered.
+// Matching is token-level (a contiguous GUID/objectId/appId lives in one token).
+const buildHighlightRenderer = (query) => {
+  const q = (query || "").trim();
+  const lower = q.toLowerCase();
+
+  const splitTextNode = (value) => {
+    if (!q) return [{ type: "text", value }];
+    const lowerVal = value.toLowerCase();
+    const out = [];
+    let idx = 0;
+    let pos = lowerVal.indexOf(lower);
+    if (pos === -1) return [{ type: "text", value }];
+    while (pos !== -1) {
+      if (pos > idx) out.push({ type: "text", value: value.slice(idx, pos) });
+      out.push({
+        type: "element",
+        tagName: "mark",
+        properties: { className: ["gxr-search-hit"] },
+        children: [{ type: "text", value: value.slice(pos, pos + q.length) }],
+      });
+      idx = pos + q.length;
+      pos = lowerVal.indexOf(lower, idx);
+    }
+    if (idx < value.length) out.push({ type: "text", value: value.slice(idx) });
+    return out;
+  };
+
+  const transform = (node) => {
+    if (node.type === "text") return splitTextNode(node.value);
+    if (node.children) {
+      const children = [];
+      node.children.forEach((child) => {
+        const res = transform(child);
+        if (Array.isArray(res)) children.push(...res);
+        else children.push(res);
+      });
+      return { ...node, children };
+    }
+    return node;
+  };
+
+  return ({ rows, stylesheet, useInlineStyles }) =>
+    rows.map((node, i) =>
+      createElement({
+        node: transform(node),
+        stylesheet,
+        useInlineStyles,
+        key: `gxr-row-${i}`,
+      })
+    );
+};
+
+const ColoredUrl = ({ url, query }) => {
+  const hl = (text) => highlightText(text, query);
   const parts = [];
   try {
     // PowerShell escapes $ as `$ in URLs — clean for parsing, preserve in output
@@ -21,7 +96,7 @@ const ColoredUrl = ({ url }) => {
     parts.push(<span key="proto" className="gxr-url-protocol">{urlObj.protocol}{"//"}</span>);
 
     // Host
-    parts.push(<span key="host" className="gxr-url-host">{urlObj.host}</span>);
+    parts.push(<span key="host" className="gxr-url-host">{hl(urlObj.host)}</span>);
 
     // Path segments
     const pathSegments = urlObj.pathname.split("/").filter(Boolean);
@@ -30,7 +105,7 @@ const ColoredUrl = ({ url }) => {
       if (/^(v1\.0|beta)$/i.test(seg)) {
         parts.push(<span key={`seg-${i}`} className="gxr-url-version">{seg}</span>);
       } else {
-        parts.push(<span key={`seg-${i}`} className="gxr-url-path">{seg}</span>);
+        parts.push(<span key={`seg-${i}`} className="gxr-url-path">{hl(seg)}</span>);
       }
     });
 
@@ -45,22 +120,22 @@ const ColoredUrl = ({ url }) => {
         }
         const eqIndex = param.indexOf("=");
         if (eqIndex >= 0) {
-          parts.push(<span key={`q-key-${i}`} className="gxr-url-query-key">{preserve(decodeURIComponent(param.slice(0, eqIndex)))}</span>);
+          parts.push(<span key={`q-key-${i}`} className="gxr-url-query-key">{hl(preserve(decodeURIComponent(param.slice(0, eqIndex))))}</span>);
           parts.push(<span key={`q-eq-${i}`} className="gxr-url-query-punctuation">=</span>);
-          parts.push(<span key={`q-val-${i}`} className="gxr-url-query-value">{preserve(decodeURIComponent(param.slice(eqIndex + 1)))}</span>);
+          parts.push(<span key={`q-val-${i}`} className="gxr-url-query-value">{hl(preserve(decodeURIComponent(param.slice(eqIndex + 1))))}</span>);
         } else {
-          parts.push(<span key={`q-key-${i}`} className="gxr-url-query-key">{preserve(decodeURIComponent(param))}</span>);
+          parts.push(<span key={`q-key-${i}`} className="gxr-url-query-key">{hl(preserve(decodeURIComponent(param)))}</span>);
         }
       });
     }
   } catch {
     // Fallback for malformed URLs
-    return <span style={{ color: "#abb2bf" }}>{url}</span>;
+    return <span style={{ color: "#abb2bf" }}>{hl(url)}</span>;
   }
   return <>{parts}</>;
 };
 
-const ColoredCode = ({ code }) => {
+const ColoredCode = ({ code, query }) => {
   // Split code around URLs, rendering URLs with ColoredUrl and the rest as styled code
   // Also capture `$ (PowerShell backtick-dollar escaping) as part of the URL
   const urlRegex = /(https?:\/\/(?:[^\s"'`]|`\$)+)/g;
@@ -73,7 +148,7 @@ const ColoredCode = ({ code }) => {
     // Text before the URL
     if (match.index > lastIndex) {
       result.push(
-        <span key={key++} className="gxr-code-text">{code.slice(lastIndex, match.index)}</span>
+        <span key={key++} className="gxr-code-text">{highlightText(code.slice(lastIndex, match.index), query)}</span>
       );
     }
     // Strip surrounding quotes from the matched URL if present
@@ -81,7 +156,7 @@ const ColoredCode = ({ code }) => {
     // Remove trailing quote chars that may have been captured
     url = url.replace(/["'`]+$/, "");
     result.push(
-      <span key={key++} className="gxr-code-url"><ColoredUrl url={url} /></span>
+      <span key={key++} className="gxr-code-url"><ColoredUrl url={url} query={query} /></span>
     );
     lastIndex = match.index + match[0].length;
   }
@@ -89,19 +164,24 @@ const ColoredCode = ({ code }) => {
   // Remaining text after the last URL
   if (lastIndex < code.length) {
     result.push(
-      <span key={key++} className="gxr-code-text">{code.slice(lastIndex)}</span>
+      <span key={key++} className="gxr-code-text">{highlightText(code.slice(lastIndex), query)}</span>
     );
   }
 
   return <>{result}</>;
 };
 
-export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter }) => {
+export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter, searchText }) => {
   const [isRequestBodyExpanded, setIsRequestBodyExpanded] = useState(false);
   const [isBatchExecutionExpanded, setIsBatchExecutionExpanded] = useState(false);
   const [hoveredButton, setHoveredButton] = useState(null);
 
   const isRest = snippetLanguage === "rest";
+
+  // When the Search box has a query, highlight matches in syntax-highlighted
+  // blocks via a custom renderer; plain-text renderers get the raw query.
+  const query = (searchText || "").trim();
+  const highlightRenderer = query ? buildHighlightRenderer(query) : undefined;
 
   let urlStyle = atomOneDark;
   if (lightUrl) {
@@ -280,6 +360,7 @@ export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter }) =>
                 language="jboss-cli"
                 style={urlStyle}
                 wrapLongLines={true}
+                renderer={highlightRenderer}
                 customStyle={{
                   borderRadius: "8px",
                   padding: "12px",
@@ -436,6 +517,7 @@ export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter }) =>
                               language="json"
                               style={atomOneDark}
                               wrapLongLines={true}
+                              renderer={highlightRenderer}
                               customStyle={{
                                 borderRadius: "6px",
                                 padding: "8px",
@@ -499,6 +581,7 @@ export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter }) =>
                           language="json"
                           style={atomOneDark}
                           wrapLongLines={true}
+                          renderer={highlightRenderer}
                           customStyle={{
                             borderRadius: "8px",
                             padding: "12px",
@@ -560,6 +643,7 @@ export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter }) =>
                           language="json"
                           style={atomOneDark}
                           wrapLongLines={true}
+                          renderer={highlightRenderer}
                           customStyle={{
                             borderRadius: "8px",
                             padding: "12px",
@@ -649,7 +733,7 @@ export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter }) =>
             {isBatchExecutionExpanded && (
               <div style={{ position: "relative" }}>
                 <pre className="gxr-code-block">
-                  <ColoredCode code={request.code} />
+                  <ColoredCode code={request.code} query={query} />
                 </pre>
                 <IconButton
                   iconProps={{ iconName: "Copy" }}
@@ -707,7 +791,7 @@ export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter }) =>
             </span>
             <div style={{ position: "relative", flex: 1 }}>
               <div className="gxr-rest-url">
-                <ColoredUrl url={request.code} />
+                <ColoredUrl url={request.code} query={query} />
               </div>
               <IconButton
                 iconProps={{ iconName: "Copy" }}
@@ -749,7 +833,7 @@ export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter }) =>
         ) : (
           <div style={{ position: "relative" }}>
             <pre className="gxr-code-block">
-              <ColoredCode code={request.code} />
+              <ColoredCode code={request.code} query={query} />
             </pre>
             <IconButton
               iconProps={{ iconName: "Copy" }}
@@ -823,7 +907,7 @@ export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter }) =>
                   </span>
                   <div style={{ position: "relative", flex: 1 }}>
                     <div className="gxr-rest-url">
-                      <ColoredUrl url={snippet.code} />
+                      <ColoredUrl url={snippet.code} query={query} />
                     </div>
                     <IconButton
                       iconProps={{ iconName: "Copy" }}
@@ -874,7 +958,7 @@ export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter }) =>
               </div>
               <div style={{ position: "relative" }}>
                 <pre className="gxr-code-block">
-                  <ColoredCode code={snippet.code} />
+                  <ColoredCode code={snippet.code} query={query} />
                 </pre>
                 <IconButton
                   iconProps={{ iconName: "Copy" }}

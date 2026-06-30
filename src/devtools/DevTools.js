@@ -50,10 +50,12 @@ class DevTools extends React.Component {
       ultraXRayMode: ultraXRayMode,
       experimentalCreateFromGet: experimentalCreateFromGet,
       filterText: "",
+      searchText: "",
       selectedMethods: new Set(),
       selectedResources: new Set(),
       selectedDomains: new Set(),
       filtersExpanded: true,
+      searchExpanded: false,
     };
   }
 
@@ -316,15 +318,37 @@ class DevTools extends React.Component {
     return item.batchCodeSnippets.map((s) => (s.method || "").toUpperCase()).filter(Boolean);
   }
 
+  // Full-content searchable text for an item: URL + bodies + generated code,
+  // plus each batch sub-request's url/code. Used by the "Search" box so a GUID
+  // (objectId/appId) is found wherever it appears, not just in the URL.
+  static getSearchableText(item) {
+    const parts = [
+      item.displayRequestUrl,
+      item.requestBody,
+      item.responseContent,
+      item.code,
+    ];
+    if (DevTools.isBatchItem(item)) {
+      item.batchCodeSnippets.forEach((s) => {
+        parts.push(s.url, s.code);
+      });
+    }
+    return parts.filter(Boolean).join("\n").toLowerCase();
+  }
+
   getFilteredStack() {
-    const { stack, filterText, selectedMethods, selectedResources, selectedDomains } = this.state;
+    const { stack, filterText, searchText, selectedMethods, selectedResources, selectedDomains } = this.state;
     const search = filterText.toLowerCase();
+    const contentSearch = searchText.trim().toLowerCase();
     return stack.filter((item) => {
       if (search && !item.displayRequestUrl.toLowerCase().includes(search)) {
         // Also search inside batch sub-request URLs
         if (!DevTools.isBatchItem(item) || !item.batchCodeSnippets.some((s) => s.url.toLowerCase().includes(search))) {
           return false;
         }
+      }
+      if (contentSearch && !DevTools.getSearchableText(item).includes(contentSearch)) {
+        return false;
       }
       if (selectedMethods.size > 0) {
         if (DevTools.isBatchItem(item)) {
@@ -610,10 +634,10 @@ class DevTools extends React.Component {
                       ? `${totalCount} requests`
                       : `${filteredCount} of ${totalCount} requests`}
                   </span>
-                  {(this.state.filterText || this.state.selectedMethods.size > 0 || this.state.selectedResources.size > 0 || this.state.selectedDomains.size > 0) && (
+                  {(this.state.filterText || this.state.searchText || this.state.selectedMethods.size > 0 || this.state.selectedResources.size > 0 || this.state.selectedDomains.size > 0) && (
                     <button
                       className="gxr-pill gxr-pill-clear"
-                      onClick={() => this.setState({ filterText: "", selectedMethods: new Set(), selectedResources: new Set(), selectedDomains: new Set() })}
+                      onClick={() => this.setState({ filterText: "", searchText: "", selectedMethods: new Set(), selectedResources: new Set(), selectedDomains: new Set() })}
                     >
                       Clear filters
                     </button>
@@ -678,6 +702,40 @@ class DevTools extends React.Component {
                 )}
               </div>
 
+              {/* Search bar — full-content search (URL + bodies + code), sibling to Filters */}
+              <div className="gxr-filter-bar">
+                <div className="gxr-filter-header">
+                  <button
+                    className="gxr-filter-toggle"
+                    onClick={() => this.setState((prev) => ({ searchExpanded: !prev.searchExpanded }))}
+                    title={this.state.searchExpanded ? "Collapse search" : "Expand search"}
+                  >
+                    <span className={`gxr-filter-chevron ${this.state.searchExpanded ? "gxr-filter-chevron-open" : ""}`}>&#9656;</span>
+                    Search
+                  </button>
+                  {this.state.searchText && (
+                    <button
+                      className="gxr-pill gxr-pill-clear"
+                      onClick={() => this.setState({ searchText: "" })}
+                    >
+                      Clear search
+                    </button>
+                  )}
+                </div>
+
+                {this.state.searchExpanded && (
+                  <div className="gxr-filter-body">
+                    <SearchBox
+                      placeholder="Search GUID, objectId, appId, any text..."
+                      value={this.state.searchText}
+                      onChange={(_, val) => this.setState({ searchText: val || "" })}
+                      onClear={() => this.setState({ searchText: "" })}
+                      styles={{ root: { maxWidth: 360, minWidth: 220 } }}
+                    />
+                  </div>
+                )}
+              </div>
+
               {filteredStack.map((request, index) => (
                 <div
                   key={index}
@@ -693,6 +751,7 @@ class DevTools extends React.Component {
                     lightUrl={true}
                     snippetLanguage={this.state.snippetLanguage}
                     batchFilter={this.getBatchFilter()}
+                    searchText={this.state.searchText}
                   ></CodeView>
                 </div>
               ))}
