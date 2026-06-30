@@ -24,7 +24,7 @@ const configFactory = require('../config/webpack.config');
 const paths = require('../config/paths');
 // Use local helper to avoid deprecated fs.F_OK usage in older react-dev-utils.
 const checkRequiredFiles = require('./utils/checkRequiredFiles');
-const { createFirefoxManifest } = require('./utils/manifestBuilder');
+const { createFirefoxManifest, applyDevManifestLabel } = require('./utils/manifestBuilder');
 const formatWebpackMessages = require('react-dev-utils/formatWebpackMessages');
 const printHostingInstructions = require('react-dev-utils/printHostingInstructions');
 const FileSizeReporter = require('react-dev-utils/FileSizeReporter');
@@ -79,6 +79,12 @@ checkBrowsers(paths.appPath, isInteractive)
     // Merge with the public folder
     const copyPublicFolder = require('./utils/copyPublicFolder');
     copyPublicFolder(paths.appBuild);
+    // DEV build: append "(DEV)" to the extension manifest names. Done before the
+    // Firefox build folder is derived (createFirefoxBuildFolder), so Firefox
+    // inherits the suffix from this Chromium manifest.
+    if (process.env.REACT_APP_DEV_BUILD === 'true') {
+      applyDevManifestLabel(path.join(paths.appBuild, 'manifest.json'));
+    }
     // Start the webpack build
     return build(previousFileSizes);
   })

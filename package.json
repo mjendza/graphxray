@@ -81,6 +81,7 @@
   "scripts": {
     "start": "node --openssl-legacy-provider scripts/start.js",
     "build": "node --openssl-legacy-provider scripts/build.js",
+    "build:dev": "node --openssl-legacy-provider scripts/build-dev.js",
     "build:firefox": "node --openssl-legacy-provider scripts/build-firefox.js",
     "test": "node scripts/test.js"
   },

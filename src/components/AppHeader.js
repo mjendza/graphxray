@@ -3,6 +3,22 @@ import { DefaultPalette } from "@fluentui/react";
 import { FontSizes } from "@fluentui/theme";
 import { CommandMenu } from "./CommandMenu.js";
 
+// Set at build time by the dedicated `npm run build:dev` script (via DefinePlugin).
+// Undefined in production builds, so the DEV badge never renders there.
+const isDevBuild = process.env.REACT_APP_DEV_BUILD === "true";
+
+const devBadgeStyle = {
+  marginLeft: 8,
+  padding: "1px 6px",
+  borderRadius: 4,
+  background: DefaultPalette.orangeLight,
+  color: DefaultPalette.white,
+  fontSize: FontSizes.size12,
+  fontWeight: 600,
+  textTransform: "uppercase",
+  letterSpacing: 0.5,
+};
+
 // Non-mutating styles definition
 const stackItemStyles = {
   root: {
@@ -39,9 +55,12 @@ export const AppHeader = ({ hideSettings }) => {
           style={{
             fontSize: FontSizes.size16,
             fontWeight: 600,
+            display: "flex",
+            alignItems: "center",
           }}
         >
           Microsoft Graph X-Ray
+          {isDevBuild && <span style={devBadgeStyle}>DEV Build</span>}
         </div>
       </Stack.Item>
       <Stack.Item grow styles={stackItemStyles}>
