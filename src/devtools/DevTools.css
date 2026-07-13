@@ -44,6 +44,47 @@ td, th {
   padding: 0 1px;
 }
 
+/* The currently-selected match during prev/next navigation. */
+.gxr-search-hit-active {
+  background: #fa8c16;
+  color: #fff;
+  box-shadow: 0 0 0 2px rgba(250, 140, 22, 0.4);
+}
+
+/* Prev/next match navigation in the Search bar. */
+.gxr-search-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+}
+
+.gxr-search-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+  border: 1px solid #d2d0ce;
+  border-radius: 4px;
+  background: #fff;
+  color: #323130;
+  cursor: pointer;
+}
+
+.gxr-search-nav-btn:hover {
+  background: #f3f2f1;
+}
+
+.gxr-search-nav-count {
+  font-size: 12px;
+  color: #605e5c;
+  white-space: nowrap;
+}
+
 .gxr-filter-header {
   display: flex;
   align-items: center;
