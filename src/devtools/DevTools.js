@@ -56,7 +56,12 @@ class DevTools extends React.Component {
       selectedDomains: new Set(),
       filtersExpanded: true,
       searchExpanded: false,
+      matchCount: 0,
+      activeMatchIndex: 0,
     };
+    // Container around the rendered results; used to locate highlighted matches
+    // (.gxr-search-hit) for the search match count and prev/next navigation.
+    this.resultsRef = React.createRef();
   }
 
   componentDidMount() {
