@@ -759,6 +759,12 @@ class DevTools extends React.Component {
                     <span className={`gxr-filter-chevron ${this.state.searchExpanded ? "gxr-filter-chevron-open" : ""}`}>&#9656;</span>
                     Search
                   </button>
+                  {this.state.searchText.trim() && (
+                    <span className="gxr-filter-count">
+                      {filteredStack.length === 1 ? "1 item found" : `${filteredStack.length} items found`}
+                      {this.state.matchCount > 0 ? ` · ${this.state.matchCount} matches` : ""}
+                    </span>
+                  )}
                   {this.state.searchText && (
                     <button
                       className="gxr-pill gxr-pill-clear"
@@ -778,10 +784,40 @@ class DevTools extends React.Component {
                       onClear={() => this.setState({ searchText: "" })}
                       styles={{ root: { maxWidth: 360, minWidth: 220 } }}
                     />
+                    {this.state.searchText.trim() && (
+                      <div className="gxr-search-nav">
+                        {this.state.matchCount > 0 ? (
+                          <>
+                            <button
+                              className="gxr-search-nav-btn"
+                              onClick={this.prevMatch}
+                              title="Previous match"
+                              aria-label="Previous match"
+                            >
+                              &#8249;
+                            </button>
+                            <span className="gxr-search-nav-count">
+                              {this.state.activeMatchIndex + 1} of {this.state.matchCount}
+                            </span>
+                            <button
+                              className="gxr-search-nav-btn"
+                              onClick={this.nextMatch}
+                              title="Next match"
+                              aria-label="Next match"
+                            >
+                              &#8250;
+                            </button>
+                          </>
+                        ) : (
+                          <span className="gxr-search-nav-count">No matches</span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
 
+              <div ref={this.resultsRef}>
               {filteredStack.map((request, index) => (
                 <div
                   key={index}
@@ -801,6 +837,7 @@ class DevTools extends React.Component {
                   ></CodeView>
                 </div>
               ))}
+              </div>
             </div>
             );
           })()}
