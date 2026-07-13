@@ -182,6 +182,10 @@ export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter, sear
   // blocks via a custom renderer; plain-text renderers get the raw query.
   const query = (searchText || "").trim();
   const highlightRenderer = query ? buildHighlightRenderer(query) : undefined;
+  // While searching, force the collapsible request/response and batch-execution
+  // sections open so matches inside them render in the DOM (countable + scrollable).
+  const showRequestBody = isRequestBodyExpanded || !!query;
+  const showBatchExecution = isBatchExecutionExpanded || !!query;
 
   let urlStyle = atomOneDark;
   if (lightUrl) {
@@ -329,8 +333,8 @@ export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter, sear
           <div style={{ display: "flex", alignItems: "center", marginBottom: "8px" }}>
             {((request.requestBody && request.requestBody.length > 0) || (request.responseContent && request.responseContent.length > 0)) && (
               <IconButton
-                iconProps={{ iconName: isRequestBodyExpanded ? "ChevronDown" : "ChevronRight" }}
-                title={isRequestBodyExpanded ? "Collapse request/response" : "Expand request/response"}
+                iconProps={{ iconName: showRequestBody ? "ChevronDown" : "ChevronRight" }}
+                title={showRequestBody ? "Collapse request/response" : "Expand request/response"}
                 onClick={toggleRequestBody}
                 onMouseEnter={() => setHoveredButton('expand')}
                 onMouseLeave={() => setHoveredButton(null)}
@@ -408,7 +412,7 @@ export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter, sear
             </div>
           </div>
 
-          {isRequestBodyExpanded && ((request.requestBody && request.requestBody.length > 0) || (request.responseContent && request.responseContent.length > 0)) && (
+          {showRequestBody && ((request.requestBody && request.requestBody.length > 0) || (request.responseContent && request.responseContent.length > 0)) && (
             <div style={{
               border: "2px solid rgba(0, 0, 0, 0.2)",
               borderRadius: "8px",
@@ -701,10 +705,10 @@ export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter, sear
         request.batchCodeSnippets && request.batchCodeSnippets.length > 0 ? (
           <div style={{ marginBottom: "15px" }}>
             {/* Keep batch execution code available, but collapsed by default so focus stays on per-request snippets. */}
-            <div style={{ display: "flex", alignItems: "center", marginBottom: isBatchExecutionExpanded ? "8px" : "0" }}>
+            <div style={{ display: "flex", alignItems: "center", marginBottom: showBatchExecution ? "8px" : "0" }}>
               <IconButton
-                iconProps={{ iconName: isBatchExecutionExpanded ? "ChevronDown" : "ChevronRight" }}
-                title={isBatchExecutionExpanded ? "Collapse batch execution snippet" : "Expand batch execution snippet"}
+                iconProps={{ iconName: showBatchExecution ? "ChevronDown" : "ChevronRight" }}
+                title={showBatchExecution ? "Collapse batch execution snippet" : "Expand batch execution snippet"}
                 onClick={toggleBatchExecution}
                 onMouseEnter={() => setHoveredButton('batch-execution-toggle')}
                 onMouseLeave={() => setHoveredButton(null)}
@@ -730,7 +734,7 @@ export const CodeView = ({ request, lightUrl, snippetLanguage, batchFilter, sear
               </div>
             </div>
 
-            {isBatchExecutionExpanded && (
+            {showBatchExecution && (
               <div style={{ position: "relative" }}>
                 <pre className="gxr-code-block">
                   <ColoredCode code={request.code} query={query} />
