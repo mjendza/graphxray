@@ -70,6 +70,47 @@ class DevTools extends React.Component {
     this.addListenerGraph();
   }
 
+  componentDidUpdate(prevProps, prevState) {
+    // Recompute the match set whenever the query or the captured stack changes
+    // (navigating between matches must NOT trigger a recompute → no loop).
+    if (
+      prevState.searchText !== this.state.searchText ||
+      prevState.stack !== this.state.stack
+    ) {
+      this.recomputeMatches();
+    }
+  }
+
+  getMatchElements() {
+    if (!this.resultsRef.current) return [];
+    return Array.from(this.resultsRef.current.querySelectorAll(".gxr-search-hit"));
+  }
+
+  recomputeMatches() {
+    const matches = this.getMatchElements();
+    const matchCount = matches.length;
+    const activeMatchIndex = matchCount === 0 ? 0 : Math.min(this.state.activeMatchIndex, matchCount - 1);
+    this.setState({ matchCount, activeMatchIndex }, () => {
+      if (matchCount > 0) this.goToMatch(activeMatchIndex);
+    });
+  }
+
+  goToMatch(index) {
+    const matches = this.getMatchElements();
+    if (matches.length === 0) return;
+    const clamped = ((index % matches.length) + matches.length) % matches.length;
+    matches.forEach((el, i) => {
+      el.classList.toggle("gxr-search-hit-active", i === clamped);
+    });
+    matches[clamped].scrollIntoView({ behavior: "smooth", block: "center" });
+    if (clamped !== this.state.activeMatchIndex) {
+      this.setState({ activeMatchIndex: clamped });
+    }
+  }
+
+  nextMatch = () => this.goToMatch(this.state.activeMatchIndex + 1);
+  prevMatch = () => this.goToMatch(this.state.activeMatchIndex - 1);
+
   clearStack = () => {
     this.setState({ stack: [] });
   };
